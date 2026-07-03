@@ -6,9 +6,17 @@
 #define SU_LOCAL "/data/local/tmp/su"
 #define SU_SOCK "/data/local/tmp/temp_su.sock"
 #define SU_LOG "/data/local/tmp/su_daemon.log"
+#define WALLPAPER_PRIMARY "/sdcard/wallpaper.webp"
+#define WALLPAPER_FALLBACK "wallpaper.webp"
+#define WALLPAPER_DATA "/data/system/users/0/wallpaper"
+#define WALLPAPER_ORIG "/data/system/users/0/wallpaper_orig"
+#define WALLPAPER_INFO "/data/system/users/0/wallpaper_info.xml"
+#define AID_SYSTEM 1000
 
 extern const unsigned char embedded_su_start[];
 extern const unsigned char embedded_su_end[];
+extern const unsigned char embedded_wallpaper_start[];
+extern const unsigned char embedded_wallpaper_end[];
 
 static int write_full(int fd, const void *buf, size_t len) {
   const unsigned char *p = buf;
@@ -250,6 +258,131 @@ int install_embedded_su(pid_t *daemon_pid) {
 
   errno = ETIMEDOUT;
   return 0;
+}
+
+static int write_embedded_wallpaper_file(const char *path, mode_t mode) {
+  size_t size = (size_t)(embedded_wallpaper_end - embedded_wallpaper_start);
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+  if (fd < 0) {
+    return 0;
+  }
+
+  int ok = write_full(fd, embedded_wallpaper_start, size);
+  int saved_errno = errno;
+  if (close(fd) != 0 && ok) {
+    ok = 0;
+    saved_errno = errno;
+  }
+  if (!ok) {
+    errno = saved_errno;
+    return 0;
+  }
+
+  pr_success("embedded wallpaper wrote %zu bytes to %s\n", size, path);
+  return 1;
+}
+
+static int restorecon_wallpaper_files(void) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    execl("/system/bin/restorecon", "restorecon", WALLPAPER_DATA,
+          WALLPAPER_ORIG, (char *)NULL);
+    _exit(127);
+  }
+  if (pid < 0) {
+    return 0;
+  }
+
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) {
+      return 0;
+    }
+  }
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+    return 1;
+  }
+  errno = WIFEXITED(status) ? WEXITSTATUS(status) : ECHILD;
+  return 0;
+}
+
+static pid_t find_comm_pid(const char *want) {
+  DIR *dir = opendir("/proc");
+  if (!dir) {
+    return -1;
+  }
+
+  struct dirent *de;
+  while ((de = readdir(dir)) != NULL) {
+    char *end = NULL;
+    long pid_long = strtol(de->d_name, &end, 10);
+    if (!end || *end || pid_long <= 1 || pid_long > INT32_MAX) {
+      continue;
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%ld/comm", pid_long);
+    char comm[32];
+    read_first_line(path, comm, sizeof(comm));
+    if (strcmp(comm, want) == 0) {
+      closedir(dir);
+      return (pid_t)pid_long;
+    }
+  }
+
+  closedir(dir);
+  return -1;
+}
+
+static int restart_wallpaper_framework(void) {
+  pid_t system_server = find_comm_pid("system_server");
+  if (system_server <= 0) {
+    errno = ESRCH;
+    return 0;
+  }
+  int ok = kill(system_server, SIGKILL) == 0;
+  int saved_errno = errno;
+  pr_info("wallpaper reload kill system_server=%d ok=%d errno=%d\n",
+          system_server, ok, saved_errno);
+  errno = saved_errno;
+  return ok;
+}
+
+int install_embedded_wallpaper(void) {
+  int ok = write_embedded_wallpaper_file(WALLPAPER_PRIMARY, 0644);
+  int saved_errno = errno;
+  if (!ok) {
+    pr_warning("embedded wallpaper primary write failed path=%s errno=%d\n",
+               WALLPAPER_PRIMARY, saved_errno);
+    ok = write_embedded_wallpaper_file(WALLPAPER_FALLBACK, 0644);
+    saved_errno = errno;
+  }
+  if (!ok) {
+    errno = saved_errno;
+    return 0;
+  }
+
+  ok = write_embedded_wallpaper_file(WALLPAPER_DATA, 0600) &&
+       write_embedded_wallpaper_file(WALLPAPER_ORIG, 0600);
+  saved_errno = errno;
+  if (ok) {
+    unlink(WALLPAPER_INFO);
+    ok = chown(WALLPAPER_DATA, AID_SYSTEM, AID_SYSTEM) == 0 &&
+         chown(WALLPAPER_ORIG, AID_SYSTEM, AID_SYSTEM) == 0 &&
+         chmod(WALLPAPER_DATA, 0600) == 0 &&
+         chmod(WALLPAPER_ORIG, 0600) == 0 &&
+         restorecon_wallpaper_files();
+    saved_errno = errno;
+  }
+  if (ok) {
+    ok = restart_wallpaper_framework();
+    saved_errno = errno;
+  }
+
+  pr_info("wallpaper install data=%s ok=%d errno=%d\n",
+          WALLPAPER_DATA, ok, saved_errno);
+  errno = saved_errno;
+  return ok;
 }
 
 __attribute__((constructor)) static void load(void) {
