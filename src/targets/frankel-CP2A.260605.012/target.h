@@ -2,7 +2,9 @@
 #define OFFSET_H
 
 #define BUILD_VARIANT_LABEL "p10_ab152_truephone"
+#ifndef BUILD_FINGERPRINT
 #define BUILD_FINGERPRINT "google/frankel/frankel:17/CP2A.260605.012/15430684:user/release-keys"
+#endif
 
 #define KIMAGE_TEXT_BASE 0xffffffc080000000ULL
 #define P0_PAGE_OFFSET 0xffffff8000000000ULL
