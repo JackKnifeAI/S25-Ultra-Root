@@ -602,12 +602,6 @@ uint64_t pipe_read64(int fd, uintptr_t direct_addr) {
   return value;
 }
 
-uint32_t pipe_read32(int fd, uintptr_t direct_addr) {
-  uint32_t value = 0;
-  pipe_phys_read_data(fd, direct_addr, &value, sizeof(value));
-  return value;
-}
-
 int pipe_write64(int fd, uintptr_t direct_addr, uint64_t value) {
   return pipe_phys_write_data(fd, direct_addr, &value, sizeof(value));
 }
