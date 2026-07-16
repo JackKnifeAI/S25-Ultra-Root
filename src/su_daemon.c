@@ -303,9 +303,6 @@ static int daemon_main(void) {
     return 1;
   }
 
-  fprintf(stderr, "su daemon ready pid=%d socket=%s uid=%d euid=%d\n",
-          getpid(), SOCK_PATH, getuid(), geteuid());
-
   for (;;) {
     int conn = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
     if (conn < 0 && errno == EINTR) {
@@ -330,9 +327,24 @@ static int daemon_main(void) {
   }
 }
 
+static int umh_main(void) {
+  if (geteuid() != 0) {
+    return 126;
+  }
+  if (setresgid(0, 0, 0) != 0 || setresuid(0, 0, 0) != 0 ||
+      getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) {
+    return 125;
+  }
+
+  return daemon_main();
+}
+
 int main(int argc, char **argv) {
   if (argc >= 2 && strcmp(argv[1], "--daemon") == 0) {
     return daemon_main();
+  }
+  if (argc >= 2 && strcmp(argv[1], "--umh") == 0) {
+    return umh_main();
   }
   return client_main(argc, argv);
 }
