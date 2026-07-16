@@ -1,4 +1,4 @@
-# CVE-2026-43499 — Galaxy S25 Ultra Port
+# CVE-2026-43499 - Galaxy S25 Ultra 
 
 This repository contains a device-specific port of the CVE-2026-43499
 exploit for the Korean Samsung Galaxy S25 Ultra.
