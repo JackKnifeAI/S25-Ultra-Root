@@ -1,7 +1,7 @@
 #ifndef OFFSET_H
 #define OFFSET_H
 
-#define BUILD_VARIANT_LABEL "pa3q-S938NKSUACZF1-fops-pin"
+#define BUILD_VARIANT_LABEL "pa3q-S938NKSUACZF1-fork-retry"
 #ifndef BUILD_FINGERPRINT
 #define BUILD_FINGERPRINT "samsung/pa3qksx/pa3q:16/BP4A.251205.006/S938NKSUACZF1_OKRACZF1:user/release-keys"
 #endif

