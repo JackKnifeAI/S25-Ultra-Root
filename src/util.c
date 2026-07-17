@@ -331,6 +331,10 @@ pid_t clone_child(void) {
 pid_t clone_leak_child(void) {
   pid_t child = SYSCHK(syscall(SYS_clone, SIGCHLD, NULL, NULL, NULL, 0));
   if (child == 0) {
+    SYSCHK(prctl(PR_SET_PDEATHSIG, SIGKILL));
+    if (getppid() == 1) {
+      _exit(1);
+    }
     kernelsnitch_find_collisions(ks);
     exit(0);
   }

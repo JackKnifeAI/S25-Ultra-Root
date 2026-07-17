@@ -2,7 +2,7 @@
 
 #define DEFAULT_EXPLOIT_ATTEMPTS 16
 #define DEFAULT_PSELECT_DELAY_USEC 20000
-#define DEFAULT_ATTEMPT_TIMEOUT_SEC 45
+#define DEFAULT_ATTEMPT_TIMEOUT_SEC 300
 
 static int env_int(const char *name, int fallback, int min, int max) {
   const char *value = getenv(name);
