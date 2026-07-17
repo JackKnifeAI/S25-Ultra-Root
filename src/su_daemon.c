@@ -2,17 +2,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <dlfcn.h>
 #include <poll.h>
-#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/mount.h>
-#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/system_properties.h>
@@ -24,8 +20,6 @@
 
 #define BOOTSTRAP_SOCK_PATH "/data/local/tmp/temp_su.sock"
 #define SH_PATH "/system/bin/sh"
-#define S25U_KSUD_PATH "/data/local/tmp/ksud-s25u-kdp"
-#define LOGCAT_PATH "/system/bin/logcat"
 
 static uid_t allowed_client_uid = 2000;
 
@@ -339,41 +333,6 @@ static int wait_status(pid_t pid) {
     return 128 + WTERMSIG(status);
   }
   return 1;
-}
-
-static int run_s25u_late_load(struct su_request *request, int conn) {
-  pid_t pid = fork();
-  if (pid < 0) {
-    return 1;
-  }
-  if (pid == 0) {
-    if (dup2(request->stdin_fd, STDIN_FILENO) < 0 ||
-        dup2(request->stdout_fd, STDOUT_FILENO) < 0 ||
-        dup2(request->stderr_fd, STDERR_FILENO) < 0 ||
-        fchdir(request->cwd_fd) != 0) {
-      _exit(126);
-    }
-    close(conn);
-    close_request_fds(request);
-
-    if (unshare(CLONE_NEWNS) != 0 ||
-        mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
-      dprintf(STDERR_FILENO, "late-load: private mount namespace: %s\n",
-              strerror(errno));
-      _exit(10);
-    }
-    if (mount(S25U_KSUD_PATH, LOGCAT_PATH, NULL, MS_BIND, NULL) != 0) {
-      dprintf(STDERR_FILENO, "late-load: bind mount: %s\n", strerror(errno));
-      _exit(11);
-    }
-
-    execl(LOGCAT_PATH, "logcat", "late-load", "--kmi", "android15-6.6",
-          "--package-name", "me.weishu.kernelsu", (char *)NULL);
-    dprintf(STDERR_FILENO, "late-load: exec: %s\n", strerror(errno));
-    _exit(12);
-  }
-  close_request_fds(request);
-  return wait_status(pid);
 }
 
 static void send_response(int conn, int status) {
@@ -707,13 +666,9 @@ static void serve_one(int conn) {
     return;
   }
 
-  int is_s25u_late_load = request.header.argc == 2 &&
-                           strcmp(request.argv[1], "--late-load") == 0;
-  int status = is_s25u_late_load
-                   ? run_s25u_late_load(&request, conn)
-                   : request.header.interactive
-                         ? run_interactive(&request, conn)
-                         : run_direct(&request, conn);
+  int status = request.header.interactive
+                   ? run_interactive(&request, conn)
+                   : run_direct(&request, conn);
   send_response(conn, status);
   free_request(&request);
 }
@@ -785,42 +740,8 @@ static int umh_main(int argc, char **argv) {
   return daemon_main();
 }
 
-static int payload_runner_main(int argc, char **argv) {
-  if (argc != 5) {
-    return 2;
-  }
-
-  if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() == 1) {
-    return errno ? errno : ESRCH;
-  }
-
-  int log_fd = open(argv[4], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-  if (log_fd < 0 || dup2(log_fd, STDOUT_FILENO) < 0 ||
-      dup2(log_fd, STDERR_FILENO) < 0) {
-    return errno ? errno : EIO;
-  }
-  if (log_fd > STDERR_FILENO) {
-    close(log_fd);
-  }
-
-  if (setenv("CVE43499_ROOT_HELPER", argv[3], 1) != 0) {
-    return errno;
-  }
-  dprintf(STDERR_FILENO, "[app] loading verified payload=%s\n", argv[2]);
-  void *handle = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
-  if (!handle) {
-    dprintf(STDERR_FILENO, "[app] dlopen failed: %s\n", dlerror());
-    return ENOEXEC;
-  }
-  dprintf(STDERR_FILENO, "[app] payload constructor returned\n");
-  return 0;
-}
-
 int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
-  if (argc >= 2 && strcmp(argv[1], "--run-payload") == 0) {
-    return payload_runner_main(argc, argv);
-  }
   if (argc >= 2 && strcmp(argv[1], "--daemon") == 0) {
     return daemon_main();
   }

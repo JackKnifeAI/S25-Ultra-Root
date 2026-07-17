@@ -117,14 +117,6 @@ static int install_workqueue_umh_root(int fd) {
   struct umh_kernel_data umh_data;
   memset(&umh_data, 0, sizeof(umh_data));
   const char *root_umh_path = ROOT_UMH_PATH;
-#if defined(APP_PAYLOAD) && APP_PAYLOAD
-  const char *app_root_umh_path = getenv("CVE43499_ROOT_HELPER");
-  if (!app_root_umh_path || app_root_umh_path[0] != '/') {
-    pr_error("root umh missing CVE43499_ROOT_HELPER\n");
-    return 0;
-  }
-  root_umh_path = app_root_umh_path;
-#endif
   if (snprintf(umh_data.path, sizeof(umh_data.path), "%s", root_umh_path) >=
       (int)sizeof(umh_data.path)) {
     pr_error("root umh helper path too long\n");
