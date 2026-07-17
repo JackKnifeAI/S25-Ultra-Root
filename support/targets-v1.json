@@ -13,8 +13,8 @@
       "pageSize": 4096,
       "exploit": {
         "url": "https://raw.githubusercontent.com/BuSung-dev/CVE-2026-43499-S25U/main/artifacts/pa3q-S938NKSUACZF1/cve-2026-43499-app.so",
-        "size": 101536,
-        "sha256": "e228397045b9863f2758581bd0d3b868ceaa313f212b245fef578aaac08c9015"
+        "size": 101776,
+        "sha256": "553ae2d6434f253d4101e75e8bd4f77348ae6db81bced1294a6cbf69767cff9d"
       },
       "kernelsu": {
         "url": "https://raw.githubusercontent.com/BuSung-dev/CVE-2026-43499-S25U/main/kernelsu/ksud-s25u-kdp",

