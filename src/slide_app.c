@@ -518,6 +518,10 @@ int slide_leak_kernel_base(void) {
 
     pid_t child = SYSCHK(fork());
     if (child == 0) {
+      SYSCHK(prctl(PR_SET_PDEATHSIG, SIGKILL));
+      if (getppid() == 1) {
+        _exit(1);
+      }
       SYSCHK(close(fds[0]));
       disable_rseq_for_thread();
       slide_log_child_context();

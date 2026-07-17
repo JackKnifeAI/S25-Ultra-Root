@@ -256,6 +256,10 @@ uintptr_t prepare_pipe_buffer_page(void) {
   SYSCHK(pipe(result_pipe));
   pid_t child = SYSCHK(fork());
   if (child == 0) {
+    SYSCHK(prctl(PR_SET_PDEATHSIG, SIGKILL));
+    if (getppid() == 1) {
+      _exit(1);
+    }
     SYSCHK(close(result_pipe[0]));
     uintptr_t base = prepare_pipe_buffer_page_child();
     SYSCHK(write(result_pipe[1], &base, sizeof(base)));

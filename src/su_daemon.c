@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
@@ -11,6 +12,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/system_properties.h>
@@ -783,8 +785,42 @@ static int umh_main(int argc, char **argv) {
   return daemon_main();
 }
 
+static int payload_runner_main(int argc, char **argv) {
+  if (argc != 5) {
+    return 2;
+  }
+
+  if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() == 1) {
+    return errno ? errno : ESRCH;
+  }
+
+  int log_fd = open(argv[4], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (log_fd < 0 || dup2(log_fd, STDOUT_FILENO) < 0 ||
+      dup2(log_fd, STDERR_FILENO) < 0) {
+    return errno ? errno : EIO;
+  }
+  if (log_fd > STDERR_FILENO) {
+    close(log_fd);
+  }
+
+  if (setenv("CVE43499_ROOT_HELPER", argv[3], 1) != 0) {
+    return errno;
+  }
+  dprintf(STDERR_FILENO, "[app] loading verified payload=%s\n", argv[2]);
+  void *handle = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
+  if (!handle) {
+    dprintf(STDERR_FILENO, "[app] dlopen failed: %s\n", dlerror());
+    return ENOEXEC;
+  }
+  dprintf(STDERR_FILENO, "[app] payload constructor returned\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
+  if (argc >= 2 && strcmp(argv[1], "--run-payload") == 0) {
+    return payload_runner_main(argc, argv);
+  }
   if (argc >= 2 && strcmp(argv[1], "--daemon") == 0) {
     return daemon_main();
   }
