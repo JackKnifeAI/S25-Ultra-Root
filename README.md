@@ -97,12 +97,14 @@ fingerprint, SDK, ABI, and page size.
 The manifest currently references:
 
 ```text
-artifacts/pa3q-S938NKSUACZF1/cve-2026-43499-app.so
+artifacts/pa3q-S938NKSUACZF1/cve-2026-43499-app-553ae2d6434f253d.so
 kernelsu/ksud-s25u-kdp
 ```
 
 Each downloaded file is checked against its signed size and SHA-256 before it
-is loaded. The signing private key is not stored in this repository.
+is loaded. Payload filenames are content-addressed and never overwritten, so a
+CDN cache cannot pair a new signed manifest with stale bytes. The signing
+private key is not stored in this repository.
 
 For the application path, the bootstrap helper receives the originating app
 UID from the kernel user-mode-helper invocation and accepts only that exact
