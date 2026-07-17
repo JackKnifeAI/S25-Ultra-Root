@@ -84,6 +84,9 @@ build/cve-2026-43499-root
 `cve-2026-43499-app.so` is the app-domain payload. It uses the upstream
 pselect/`boot_id` KASLR disclosure because Samsung SELinux denies tracefs to
 `untrusted_app`, while the boot-ID-specific ashmem device remains available.
+The 32 possible `p0` offsets are attempted in separate supervised processes;
+once the correct offset leaves the kernel-text pointer in `boot_id`, later
+physical-RW retries reuse that disclosure without repeating the KASLR race.
 The command-line payload keeps the verified tracefs route.
 
 ## Signed application feed
@@ -97,7 +100,7 @@ fingerprint, SDK, ABI, and page size.
 The manifest currently references:
 
 ```text
-artifacts/pa3q-S938NKSUACZF1/cve-2026-43499-app-553ae2d6434f253d.so
+artifacts/pa3q-S938NKSUACZF1/cve-2026-43499-app-b43b250f9bb76261.so
 kernelsu/ksud-s25u-kdp
 ```
 

