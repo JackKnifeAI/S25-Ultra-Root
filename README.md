@@ -1,11 +1,12 @@
-# CVE-2026-43499 - Galaxy S25 Ultra
 
+# CVE-2026-43499 - Galaxy S25 Ultra
 <img width="1905" height="483" alt="image" src="https://github.com/user-attachments/assets/5c58ce25-40b1-4ef2-ac60-f368135cb899" />
 <img width="522" height="81" alt="image" src="https://github.com/user-attachments/assets/30205934-9c28-42c5-a2ac-e10b30024685" />
 
-
 This repository contains a device-specific port of the CVE-2026-43499
 exploit for the Korean Samsung Galaxy S25 Ultra.
+
+<img width="1080" height="2340" alt="KakaoTalk_20260717_202958219" src="https://github.com/user-attachments/assets/dfe6a621-4dac-463b-baf0-46fb8fb10958" />
 
 ## Supported target
 
