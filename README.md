@@ -77,8 +77,37 @@ Outputs:
 
 ```text
 build/cve-2026-43499
+build/cve-2026-43499-app.so
 build/cve-2026-43499-root
 ```
+
+`cve-2026-43499-app.so` is the app-domain payload. It uses the upstream
+pselect/`boot_id` KASLR disclosure because Samsung SELinux denies tracefs to
+`untrusted_app`, while the boot-ID-specific ashmem device remains available.
+The command-line payload keeps the verified tracefs route.
+
+## Signed application feed
+
+The one-click application fetches [support/targets-v1.json](support/targets-v1.json)
+and verifies [support/targets-v1.sig](support/targets-v1.sig) with its pinned
+Ed25519 public key before parsing any target or URL. A profile must match the
+manufacturer, model, device codename, complete build display ID, complete
+fingerprint, SDK, ABI, and page size.
+
+The manifest currently references:
+
+```text
+artifacts/pa3q-S938NKSUACZF1/cve-2026-43499-app.so
+kernelsu/ksud-s25u-kdp
+```
+
+Each downloaded file is checked against its signed size and SHA-256 before it
+is loaded. The signing private key is not stored in this repository.
+
+For the application path, the bootstrap helper receives the originating app
+UID from the kernel user-mode-helper invocation and accepts only that exact
+UID through `SO_PEERCRED`. The command-line path continues to authorize the
+originating shell UID in the same way.
 
 ## Deploy
 

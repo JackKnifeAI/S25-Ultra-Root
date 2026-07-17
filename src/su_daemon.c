@@ -25,6 +25,8 @@
 #define S25U_KSUD_PATH "/data/local/tmp/ksud-s25u-kdp"
 #define LOGCAT_PATH "/system/bin/logcat"
 
+static uid_t allowed_client_uid = 2000;
+
 #define SU_PROTOCOL_MAGIC 0x53553235U
 #define SU_PROTOCOL_VERSION 1U
 #define SU_RESPONSE_MAGIC 0x53555235U
@@ -686,7 +688,7 @@ static int get_peer_cred(int conn, struct ucred *peer) {
 
 static void serve_one(int conn) {
   struct ucred peer;
-  if (!get_peer_cred(conn, &peer) || peer.uid != 2000) {
+  if (!get_peer_cred(conn, &peer) || peer.uid != allowed_client_uid) {
     char denied = 'D';
     write_full(conn, &denied, sizeof(denied));
     return;
@@ -759,10 +761,21 @@ static int daemon_main(void) {
   }
 }
 
-static int umh_main(void) {
+static int umh_main(int argc, char **argv) {
   if (geteuid() != 0) {
     return 126;
   }
+  if (argc != 3) {
+    return 124;
+  }
+  char *end = NULL;
+  errno = 0;
+  unsigned long parsed_uid = strtoul(argv[2], &end, 10);
+  if (errno || end == argv[2] || *end || parsed_uid == 0 ||
+      parsed_uid > UINT32_MAX) {
+    return 123;
+  }
+  allowed_client_uid = (uid_t)parsed_uid;
   if (setresgid(0, 0, 0) != 0 || setresuid(0, 0, 0) != 0 ||
       getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) {
     return 125;
@@ -776,7 +789,7 @@ int main(int argc, char **argv) {
     return daemon_main();
   }
   if (argc >= 2 && strcmp(argv[1], "--umh") == 0) {
-    return umh_main();
+    return umh_main(argc, argv);
   }
   return client_main(argc, argv);
 }
