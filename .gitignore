@@ -1,0 +1,13 @@
+build/
+*.o
+*.so
+*.img
+*.tar
+*.tar.gz
+*.jsonl
+*.apk
+# Never publish personal device keys
+efs_data/
+DAK/
+*.private
+*.private.val
