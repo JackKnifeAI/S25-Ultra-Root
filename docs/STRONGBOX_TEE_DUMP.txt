@@ -1,0 +1,126 @@
+=== KERNEL STRONGBOX SYMBOLS ===
+0000000000000000 W __arm64_sys_spu_run
+0000000000000000 W __arm64_sys_spu_create
+0000000000000000 t hdcp2_update_app_data_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_close_stream_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_open_stream_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_force_encryption_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_feature_supported_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_app_stop_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_app_query_stream_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_app_timeout_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_app_enable_encryption_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_app_process_msg_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_app_start_auth_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_app_start_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_deinit_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp2_init_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp1_stop_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp1_start_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp1_ops_notify_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp1_set_enc_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp1_feature_supported_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 t hdcp1_init_smcinvoke	[hdcp_qseecom_dlkm]
+0000000000000000 r __kstrtab_spu_firmware_signature_verify	[sec_common_fn]
+0000000000000000 r __kstrtabns_spu_firmware_signature_verify	[sec_common_fn]
+0000000000000000 r __ksymtab_spu_firmware_signature_verify	[sec_common_fn]
+0000000000000000 r __crc_spu_firmware_signature_verify	[sec_common_fn]
+0000000000000000 T spu_firmware_signature_verify	[sec_common_fn]
+0000000000000000 d spu_tag_name	[sec_common_fn]
+0000000000000000 t $d.2	[smcinvoke_dlkm]
+0000000000000000 t $x.3	[smcinvoke_dlkm]
+
+=== SMCINVOKE MODULE ===
+smcinvoke_dlkm 36864 82 camera,hdcp_qseecom_dlkm,smmu_proxy_dlkm, Live 0x0000000000000000 (O)
+mem_object 20480 1 smcinvoke_dlkm, Live 0x0000000000000000
+si_core_module 36864 2 smcinvoke_dlkm,mem_object, Live 0x0000000000000000
+qseecom_proxy 20480 4 hdcp_qseecom_dlkm,smcinvoke_dlkm,mstdrv,si_core_module, Live 0x0000000000000000
+qcom_scm 98304 42 camera,msm_drm,msm_kgsl,msm_eva,ipam,msm_hw_fence,phy_msm_snps_eusb2,hdcp_qseecom_dlkm,coresight_tmc_sec,phy_msm_m31_eusb2,qcom_q6v5_pas,frpc_adsprpc,smcinvoke_dlkm,msm_video,coresight_tpdm,msm_memshare,qcom_spss,mem_object,dmesg_dumper,tz_log_dlkm,si_core_module,audpkt_ion_dlkm,hdm,governor_msm_adreno_tz,msm_sharedmem,gh_panic_notifier,eud,qcom_cpuss_sleep_stats,qrtr_gunyah,sec_qc_debug,gunyah_loader,arm_smmu,qcom_iommu_util,memory_dump_v2,qcom_wdt_core,mdt_loader,pinctrl_msm,qcom_pdc,qcom_ice,qcom_dload_mode,qcom_dma_heaps,secure_buffer, Live 0x0000000000000000
+
+=== TZ/HYP/KEYMASTER PARTITIONS ===
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/hyp_a -> /dev/block/sdd17
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/hyp_b -> /dev/block/sdd43
+lrwxrwxrwx 1 root root 15 1970-08-29 13:36 /dev/block/by-name/keymaster_a -> /dev/block/sdd6
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/keymaster_b -> /dev/block/sdd34
+lrwxrwxrwx 1 root root 15 1970-08-29 13:36 /dev/block/by-name/tz_a -> /dev/block/sdd2
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/tz_b -> /dev/block/sdd31
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/tz_kg_a -> /dev/block/sdd20
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/tz_kg_b -> /dev/block/sdd46
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/tziccc_a -> /dev/block/sdd18
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/tziccc_b -> /dev/block/sdd44
+lrwxrwxrwx 1 root root 16 1970-08-29 13:36 /dev/block/by-name/tzsc -> /dev/block/sda40
+
+=== SPU FIRMWARE ===
+/vendor/bin/sputesthal
+/vendor/etc/init/android.hardware.gatekeeper-service-spu-qti.rc
+/vendor/etc/init/android.hardware.security.keymint-service-spu-qti.rc
+/vendor/etc/init/init.vendor.qti.hardware.spu.service.rc
+/vendor/firmware_mnt/image/adspua.jsn
+/vendor/firmware_mnt/image/adspuo.jsn
+/vendor/firmware_mnt/image/spu_rpmb.mbn
+/vendor/firmware_mnt/image/spu_service.mbn
+/vendor/lib64/libspukeymint.so
+/vendor/lib64/libspukeymintdeviceutils.so
+
+=== KEYMINT LIBS ===
+/vendor/lib64/android.hardware.keymaster-V4-ndk.so
+/vendor/lib64/android.hardware.keymaster@3.0.so
+/vendor/lib64/android.hardware.keymaster@4.0.so
+/vendor/lib64/android.hardware.keymaster@4.1.so
+/vendor/lib64/android.hardware.security.keymint-V1-ndk.so
+/vendor/lib64/android.hardware.security.keymint-V3-ndk.so
+/vendor/lib64/libkeymaster4_1support.so
+/vendor/lib64/libkeymaster4support.so
+/vendor/lib64/libkeymaster_messages.so
+/vendor/lib64/libkeymaster_portable.so
+
+=== SMCINVOKE IOCTL INTERFACE ===
+crw-rw---- 1 system drmrpc 481,   0 1970-08-29 13:36 /dev/smcinvoke
+
+=== QSEE DMA HEAPS ===
+cr--r--r-- 1 system system 249,   5 1970-08-29 13:36 /dev/dma_heap/qcom,qseecom
+cr--r--r-- 1 system system 249,   6 1970-08-29 13:36 /dev/dma_heap/qcom,qseecom-ta
+cr--r--r-- 1 system system 249,   9 1970-08-29 13:36 /dev/dma_heap/qcom,secure-sp-modem
+cr--r--r-- 1 system system 249,   8 1970-08-29 13:36 /dev/dma_heap/qcom,secure-sp-tz
+cr--r--r-- 1 system system 249,   7 1970-08-29 13:36 /dev/dma_heap/qcom,sp-hlos
+
+=== LOADED TAs (Trusted Applications) ===
+/vendor/firmware_mnt/image/05B04A44-BF30-42DF-9E2F-B366B980ED19.mdt
+/vendor/firmware_mnt/image/32552B22-89FE-42B4-8A45-A0C4E2DB0326.mdt
+/vendor/firmware_mnt/image/FD719D50-FFFB-11EB-9A03-0242AC130003.mdt
+/vendor/firmware_mnt/image/adsp.mdt
+/vendor/firmware_mnt/image/adsp_dtb.mdt
+/vendor/firmware_mnt/image/cdsp.mdt
+/vendor/firmware_mnt/image/cdsp_dtb.mdt
+/vendor/firmware_mnt/image/engmode.mdt
+/vendor/firmware_mnt/image/esecomm.mdt
+/vendor/firmware_mnt/image/evautil64.mdt
+/vendor/firmware_mnt/image/fabrickeymaster.mdt
+/vendor/firmware_mnt/image/featenabler.mdt
+/vendor/firmware_mnt/image/fingerpr.mdt
+/vendor/firmware_mnt/image/hdcp1.mdt
+/vendor/firmware_mnt/image/hdcp2p2.mdt
+/vendor/firmware_mnt/image/hdcpsrm.mdt
+/vendor/firmware_mnt/image/hwvault.mdt
+/vendor/firmware_mnt/image/ic5.mdt
+/vendor/firmware_mnt/image/ipa_fws.mdt
+/vendor/firmware_mnt/image/loadalgota64.mdt
+/vendor/firmware/CAMERA_ICP.mbn
+/vendor/firmware/CAMERA_ICP.mdt
+/vendor/firmware/CAMERA_ICP_1.mbn
+/vendor/firmware/CAMERA_ICP_1.mdt
+/vendor/firmware/evass.mbn
+/vendor/firmware/evass.mdt
+/vendor/firmware/gen70900_zap.mbn
+/vendor/firmware/gen80000_zap.mbn
+/vendor/firmware/vpu33_4v.mbn
+/vendor/firmware/vpu33_4v_unsigned.mbn
+/vendor/firmware/vpu35_4v.mbn
+/vendor/firmware/vpu35_4v_unsigned.mbn
+
+=== EFS KEYS ===
+total 24
+drwxrwx---  3 system system 4096 1969-12-31 16:00 .
+drwxrwx--x 29 system radio  4096 1970-01-08 05:49 ..
+drwxrwx---  2 system system 4096 1969-12-31 16:00 keymaster
+DUMP_COMPLETE
