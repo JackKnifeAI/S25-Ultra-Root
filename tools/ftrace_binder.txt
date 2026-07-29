@@ -1,0 +1,345 @@
+            dsms-1901    [000] .....  5219.243412: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+    binder:910_2-930     [000] .....  5219.243444: binder_ioctl_done: ret=0
+    binder:910_2-930     [000] .....  5219.243515: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [000] .....  5219.243531: binder_ioctl_done: ret=0
+    binder:910_2-930     [000] .....  5219.243532: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+            dsms-1901    [000] .....  5219.243540: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.243545: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [000] .....  5219.243546: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.243547: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [000] .....  5219.243547: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.243548: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [000] .....  5219.243549: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.243592: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [000] .....  5219.243623: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.243625: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [000] .....  5219.243625: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.243626: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [000] .....  5219.243627: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [001] .....  5219.243632: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [001] .....  5219.243846: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
+ re-initialized>-19538   [005] .....  5219.244849: binder_ioctl: cmd=0xc0046209 arg=0x7fce5f6510
+ re-initialized>-19538   [005] .....  5219.244850: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.244850: binder_ioctl: cmd=0x40046205 arg=0x7fce5f6508
+ re-initialized>-19538   [005] .....  5219.244851: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.244851: binder_ioctl: cmd=0x40046210 arg=0x7fce5f6504
+ re-initialized>-19538   [005] .....  5219.244851: binder_ioctl_done: ret=0
+  binder:19538_1-19552   [001] .....  5219.245168: binder_ioctl: cmd=0xc0306201 arg=0x70d3411020
+  binder:19538_1-19552   [001] .....  5219.245171: binder_ioctl_done: ret=0
+  binder:19538_1-19552   [001] .....  5219.245202: binder_ioctl: cmd=0xc0306201 arg=0x70d3411020
+  binder:19538_2-19553   [000] .....  5219.245251: binder_ioctl: cmd=0xc0306201 arg=0x70d230d020
+  binder:19538_2-19553   [000] .....  5219.245253: binder_ioctl_done: ret=0
+  binder:19538_2-19553   [000] .....  5219.245254: binder_ioctl: cmd=0xc0306201 arg=0x70d230d020
+            dsms-1901    [007] .....  5219.245602: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+    binder:910_2-930     [007] .....  5219.245637: binder_ioctl_done: ret=0
+    binder:910_2-930     [007] .....  5219.245691: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [007] .....  5219.245700: binder_ioctl_done: ret=0
+    binder:910_2-930     [007] .....  5219.245701: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+            dsms-1901    [007] .....  5219.245707: binder_ioctl_done: ret=0
+            dsms-1901    [007] .....  5219.245713: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [007] .....  5219.245714: binder_ioctl_done: ret=0
+            dsms-1901    [007] .....  5219.245715: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [007] .....  5219.245715: binder_ioctl_done: ret=0
+            dsms-1901    [007] .....  5219.245717: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [007] .....  5219.245718: binder_ioctl_done: ret=0
+            dsms-1901    [007] .....  5219.245749: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [007] .....  5219.245760: binder_ioctl_done: ret=0
+            dsms-1901    [007] .....  5219.245761: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [007] .....  5219.245762: binder_ioctl_done: ret=0
+            dsms-1901    [007] .....  5219.245763: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [007] .....  5219.245763: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.245770: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.245858: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
+ re-initialized>-19538   [005] .....  5219.245885: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f5fc0
+    binder:910_2-930     [005] .....  5219.245957: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.245964: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [005] .....  5219.245968: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.245969: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+ re-initialized>-19538   [005] .....  5219.245974: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.245978: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f5fd0
+ re-initialized>-19538   [005] .....  5219.245978: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.245981: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f6000
+ re-initialized>-19538   [005] .....  5219.245982: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.245983: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f6000
+ re-initialized>-19538   [005] .....  5219.245983: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.246062: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f59b0
+    binder:910_2-930     [005] .....  5219.246070: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.246117: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [005] .....  5219.246156: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.246157: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+ re-initialized>-19538   [005] .....  5219.246161: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.246168: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f57d0
+ re-initialized>-19538   [005] .....  5219.246168: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.246169: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f57d0
+ re-initialized>-19538   [005] .....  5219.246169: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.246170: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f5b10
+ re-initialized>-19538   [005] .....  5219.246171: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.246176: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f5b40
+ re-initialized>-19538   [005] .....  5219.246177: binder_ioctl_done: ret=0
+ re-initialized>-19538   [005] .....  5219.246206: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f5ff0
+   binder:2425_9-4223    [005] .....  5219.246388: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [005] .....  5219.246433: binder_ioctl: cmd=0xc0306201 arg=0x6f3c690040
+   binder:2425_9-4223    [005] .....  5219.246434: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.246990: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+    binder:910_2-930     [000] .....  5219.247005: binder_ioctl_done: ret=0
+    binder:910_2-930     [000] .....  5219.247030: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [000] .....  5219.247035: binder_ioctl_done: ret=0
+    binder:910_2-930     [000] .....  5219.247036: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+            dsms-1901    [000] .....  5219.247042: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.247046: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [000] .....  5219.247046: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.247047: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [000] .....  5219.247047: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.247048: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [000] .....  5219.247049: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.247072: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [000] .....  5219.247079: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.247081: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [000] .....  5219.247081: binder_ioctl_done: ret=0
+            dsms-1901    [000] .....  5219.247082: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [000] .....  5219.247082: binder_ioctl_done: ret=0
+   binder:2425_E-5402    [001] .....  5219.247085: binder_ioctl_done: ret=0
+   binder:2425_E-5402    [001] .....  5219.247172: binder_ioctl: cmd=0xc0306201 arg=0x6f550f4020
+  binder:19542_2-19542   [004] .....  5219.247437: binder_ioctl: cmd=0xc0046209 arg=0x7fd49ee310
+  binder:19542_2-19542   [004] .....  5219.247439: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247439: binder_ioctl: cmd=0x40046205 arg=0x7fd49ee308
+  binder:19542_2-19542   [004] .....  5219.247440: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247440: binder_ioctl: cmd=0x40046210 arg=0x7fd49ee304
+  binder:19542_2-19542   [004] .....  5219.247440: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [005] .....  5219.247464: binder_ioctl: cmd=0xc0306201 arg=0x6f3c68fd40
+  binder:19542_2-19542   [004] .....  5219.247558: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edd50
+    binder:910_2-930     [004] .....  5219.247575: binder_ioctl_done: ret=0
+    binder:910_2-930     [004] .....  5219.247578: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [004] .....  5219.247581: binder_ioctl_done: ret=0
+    binder:910_2-930     [004] .....  5219.247582: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+  binder:19542_1-19556   [004] .....  5219.247601: binder_ioctl: cmd=0xc0306201 arg=0x71c67c8910
+  binder:19542_1-19556   [004] .....  5219.247602: binder_ioctl_done: ret=0
+  binder:19542_1-19556   [004] .....  5219.247631: binder_ioctl: cmd=0xc0306201 arg=0x71c67c8910
+  binder:19542_3-19557   [004] .....  5219.247648: binder_ioctl: cmd=0xc0306201 arg=0x71c56c4910
+  binder:19542_3-19557   [004] .....  5219.247648: binder_ioctl_done: ret=0
+  binder:19542_3-19557   [004] .....  5219.247649: binder_ioctl: cmd=0xc0306201 arg=0x71c56c4910
+  binder:19542_2-19542   [004] .....  5219.247653: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247654: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edd60
+  binder:19542_2-19542   [004] .....  5219.247654: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247713: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edd90
+  binder:19542_2-19542   [004] .....  5219.247714: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247714: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edd90
+  binder:19542_2-19542   [004] .....  5219.247715: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247727: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edd70
+    binder:910_2-930     [004] .....  5219.247734: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [005] .....  5219.247786: binder_ioctl_done: ret=0
+  binder:19538_2-19553   [000] .....  5219.247793: binder_ioctl_done: ret=0
+    binder:910_2-930     [004] .....  5219.247966: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [004] .....  5219.247977: binder_ioctl_done: ret=0
+    binder:910_2-930     [004] .....  5219.247978: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+  binder:19542_2-19542   [004] .....  5219.247983: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247985: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edb90
+  binder:19542_2-19542   [004] .....  5219.247986: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247986: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edb90
+  binder:19542_2-19542   [004] .....  5219.247986: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247987: binder_ioctl: cmd=0xc0306201 arg=0x7fd49eded0
+  binder:19542_2-19542   [004] .....  5219.247988: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247990: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edf00
+  binder:19542_2-19542   [004] .....  5219.247991: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.247994: binder_ioctl: cmd=0xc0306201 arg=0x7fd49ede30
+   binder:1160_D-11270   [004] .....  5219.248008: binder_ioctl_done: ret=0
+   binder:1160_D-11270   [004] .....  5219.248018: binder_ioctl: cmd=0xc0306201 arg=0x751499a4d0
+   binder:1160_D-11270   [004] .....  5219.248020: binder_ioctl_done: ret=0
+   binder:1160_D-11270   [004] .....  5219.248021: binder_ioctl: cmd=0xc0306201 arg=0x751499a890
+  binder:19542_2-19542   [004] .....  5219.248026: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.248028: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edf90
+  binder:19542_2-19542   [004] .....  5219.248028: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.248032: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edf60
+   binder:1160_D-11270   [004] .....  5219.248037: binder_ioctl_done: ret=0
+   binder:1160_D-11270   [004] .....  5219.248057: binder_ioctl: cmd=0xc0306201 arg=0x751499a4d0
+   binder:1160_D-11270   [004] .....  5219.248062: binder_ioctl_done: ret=0
+   binder:1160_D-11270   [004] .....  5219.248063: binder_ioctl: cmd=0xc0306201 arg=0x751499a890
+  binder:19542_2-19542   [004] .....  5219.248066: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.248069: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edeb0
+  binder:19542_2-19542   [004] .....  5219.248069: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.248070: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edeb0
+  binder:19542_2-19542   [004] .....  5219.248070: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.248072: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edd40
+   binder:1160_D-11270   [004] .....  5219.248077: binder_ioctl_done: ret=0
+   binder:1160_D-11270   [004] .....  5219.248079: binder_ioctl: cmd=0xc0306201 arg=0x751499a4d0
+   binder:1160_D-11270   [004] .....  5219.248080: binder_ioctl_done: ret=0
+   binder:1160_D-11270   [004] .....  5219.248081: binder_ioctl: cmd=0xc0306201 arg=0x751499a890
+  binder:19542_2-19542   [004] .....  5219.248084: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.248085: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edea0
+  binder:19542_2-19542   [004] .....  5219.248085: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.248090: binder_ioctl: cmd=0xc0306201 arg=0x7fd49ee130
+  binder:19542_2-19542   [004] .....  5219.248090: binder_ioctl_done: ret=0
+  binder:19542_2-19542   [004] .....  5219.248203: binder_ioctl: cmd=0xc0306201 arg=0x7fd49edfb0
+   binder:1160_D-11270   [004] .....  5219.248209: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [005] .....  5219.248235: binder_ioctl: cmd=0xc0306201 arg=0x6f3c68f8c0
+   binder:2425_9-4223    [005] .....  5219.248237: binder_ioctl_done: ret=0
+   binder:1160_D-11270   [004] .....  5219.248268: binder_ioctl: cmd=0xc0306201 arg=0x7514999490
+ android.hardwar-1164    [006] .....  5219.248318: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [005] .....  5219.248338: binder_ioctl: cmd=0xc0306201 arg=0x6f3c690c60
+   binder:2425_9-4223    [005] .....  5219.248346: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [005] .....  5219.248347: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
+            dsms-1901    [001] .....  5219.248396: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+  binder:19538_2-19553   [004] .....  5219.248401: binder_ioctl: cmd=0xc0306201 arg=0x70d230d020
+    binder:910_2-930     [001] .....  5219.248407: binder_ioctl_done: ret=0
+  binder:19538_2-19553   [004] .....  5219.248416: binder_ioctl_done: ret=0
+    binder:910_2-930     [001] .....  5219.248430: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [001] .....  5219.248435: binder_ioctl_done: ret=0
+    binder:910_2-930     [001] .....  5219.248436: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+  binder:19538_2-19553   [004] .....  5219.248469: binder_ioctl: cmd=0xc0306201 arg=0x70d230d020
+            dsms-1901    [001] .....  5219.248512: binder_ioctl_done: ret=0
+            dsms-1901    [001] .....  5219.248516: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+  binder:19538_3-19558   [004] .....  5219.248516: binder_ioctl: cmd=0xc0306201 arg=0x70d1209020
+            dsms-1901    [001] .....  5219.248516: binder_ioctl_done: ret=0
+            dsms-1901    [001] .....  5219.248517: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+  binder:19538_3-19558   [004] .....  5219.248517: binder_ioctl_done: ret=0
+            dsms-1901    [001] .....  5219.248517: binder_ioctl_done: ret=0
+  binder:19538_3-19558   [004] .....  5219.248518: binder_ioctl: cmd=0xc0306201 arg=0x70d1209020
+            dsms-1901    [001] .....  5219.248518: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [001] .....  5219.248519: binder_ioctl_done: ret=0
+            dsms-1901    [001] .....  5219.248532: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [001] .....  5219.248536: binder_ioctl_done: ret=0
+            dsms-1901    [001] .....  5219.248537: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [001] .....  5219.248538: binder_ioctl_done: ret=0
+            dsms-1901    [001] .....  5219.248539: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [001] .....  5219.248539: binder_ioctl_done: ret=0
+ re-initialized>-19538   [000] .....  5219.248593: binder_ioctl_done: ret=0
+ re-initialized>-19538   [000] .....  5219.248596: binder_ioctl: cmd=0xc0306201 arg=0x7fce5f6230
+ re-initialized>-19538   [000] .....  5219.248597: binder_ioctl_done: ret=0
+      android.ui-2790    [001] .....  5219.248610: binder_ioctl: cmd=0xc0306201 arg=0x70171d77d0
+      android.ui-2790    [004] .....  5219.248727: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.248734: binder_ioctl_done: ret=0
+      android.ui-2790    [004] .....  5219.248735: binder_ioctl: cmd=0xc0306201 arg=0x70171d77d0
+   binder:4271_1-4305    [001] .....  5219.248752: binder_ioctl_done: ret=0
+   binder:4271_1-4305    [001] .....  5219.248781: binder_ioctl: cmd=0xc0306201 arg=0x70d4410020
+   binder:2425_9-4223    [000] .....  5219.248788: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
+      android.ui-2790    [004] .....  5219.248793: binder_ioctl_done: ret=0
+   binder:4186_3-4207    [001] .....  5219.248807: binder_ioctl_done: ret=0
+      android.ui-2790    [004] .....  5219.248832: binder_ioctl: cmd=0xc0306201 arg=0x70171d77d0
+   binder:4186_3-4207    [001] .....  5219.248839: binder_ioctl: cmd=0xc0306201 arg=0x712d337020
+      android.ui-2790    [004] .....  5219.248842: binder_ioctl_done: ret=0
+   binder:4186_7-6155    [000] .....  5219.248849: binder_ioctl_done: ret=0
+   binder:4186_7-6155    [000] .....  5219.248870: binder_ioctl: cmd=0xc0306201 arg=0x6ffc56e020
+      android.ui-2790    [001] .....  5219.248913: binder_ioctl: cmd=0xc0306201 arg=0x70171d77e0
+      android.ui-2790    [001] .....  5219.248942: binder_ioctl_done: ret=0
+      android.ui-2790    [001] .....  5219.248945: binder_ioctl: cmd=0xc0306201 arg=0x70171d77d0
+      android.ui-2790    [001] .....  5219.248947: binder_ioctl_done: ret=0
+   binder:1868_6-9401    [000] .....  5219.248951: binder_ioctl_done: ret=0
+      android.ui-2790    [001] .....  5219.248951: binder_ioctl: cmd=0xc0306201 arg=0x70171d77e0
+ NSLocationThrea-3684    [004] .....  5219.248953: binder_ioctl: cmd=0xc0306201 arg=0x6f39d5f7e0
+   binder:1868_6-9401    [000] .....  5219.248969: binder_ioctl: cmd=0xc0306201 arg=0x728f930790
+   binder:5157_4-16126   [004] .....  5219.248970: binder_ioctl_done: ret=0
+   binder:1868_6-9401    [000] .....  5219.248976: binder_ioctl_done: ret=0
+   binder:1868_6-9401    [000] .....  5219.248991: binder_ioctl: cmd=0xc0306201 arg=0x728f930790
+   binder:5157_4-16126   [004] .....  5219.249019: binder_ioctl: cmd=0xc0306201 arg=0x715f6f4c60
+   binder:5157_4-16126   [004] .....  5219.249024: binder_ioctl_done: ret=0
+   binder:5157_4-16126   [004] .....  5219.249025: binder_ioctl: cmd=0xc0306201 arg=0x715f6f5020
+ NSLocationThrea-3684    [004] .....  5219.249030: binder_ioctl_done: ret=0
+ NSLocationThrea-3684    [004] .....  5219.249032: binder_ioctl: cmd=0xc0306201 arg=0x6f39d5fa20
+ NSLocationThrea-3684    [004] .....  5219.249032: binder_ioctl_done: ret=0
+      android.ui-2790    [001] .....  5219.249081: binder_ioctl_done: ret=0
+      android.ui-2790    [001] .....  5219.249083: binder_ioctl: cmd=0xc0306201 arg=0x70171d77d0
+      android.ui-2790    [001] .....  5219.249084: binder_ioctl_done: ret=0
+   binder:6710_5-7267    [000] .....  5219.249088: binder_ioctl_done: ret=0
+   binder:6710_5-7267    [000] .....  5219.249142: binder_ioctl: cmd=0xc0306201 arg=0x712cd3b020
+   binder:6710_5-7267    [000] .....  5219.249147: binder_ioctl_done: ret=0
+   binder:6710_5-7267    [000] .....  5219.249160: binder_ioctl: cmd=0xc0306201 arg=0x712cd3b020
+            dsms-1901    [005] .....  5219.253322: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+    binder:910_2-930     [005] .....  5219.253336: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.253360: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [005] .....  5219.253367: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.253369: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+            dsms-1901    [005] .....  5219.253373: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.253376: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [005] .....  5219.253377: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.253377: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [005] .....  5219.253377: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.253378: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [005] .....  5219.253379: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.253403: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [005] .....  5219.253409: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.253410: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [005] .....  5219.253410: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.253411: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [005] .....  5219.253411: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.253415: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.253460: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
+            dsms-1901    [005] .....  5219.254763: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+    binder:910_2-930     [005] .....  5219.254769: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.254783: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+            dsms-1901    [005] .....  5219.254790: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.254792: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [005] .....  5219.254793: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.254793: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [005] .....  5219.254793: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.254794: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [005] .....  5219.254795: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.254810: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [005] .....  5219.254815: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.254816: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [005] .....  5219.254816: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.254817: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [005] .....  5219.254817: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.254820: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.254821: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.254823: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+   binder:2425_9-4223    [000] .....  5219.254848: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
+            dsms-1901    [005] .....  5219.255771: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+    binder:910_2-930     [005] .....  5219.255777: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.255790: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [005] .....  5219.255794: binder_ioctl_done: ret=0
+    binder:910_2-930     [005] .....  5219.255795: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+            dsms-1901    [005] .....  5219.255798: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.255800: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [005] .....  5219.255800: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.255801: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [005] .....  5219.255801: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.255802: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [005] .....  5219.255802: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.255815: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [005] .....  5219.255820: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.255821: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [005] .....  5219.255822: binder_ioctl_done: ret=0
+            dsms-1901    [005] .....  5219.255822: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [005] .....  5219.255822: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.255825: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.255852: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
+            dsms-1901    [004] .....  5219.256654: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+    binder:910_2-930     [004] .....  5219.256664: binder_ioctl_done: ret=0
+    binder:910_2-930     [004] .....  5219.256682: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [004] .....  5219.256685: binder_ioctl_done: ret=0
+    binder:910_2-930     [004] .....  5219.256686: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+            dsms-1901    [004] .....  5219.256691: binder_ioctl_done: ret=0
+            dsms-1901    [004] .....  5219.256694: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [004] .....  5219.256694: binder_ioctl_done: ret=0
+            dsms-1901    [004] .....  5219.256694: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [004] .....  5219.256695: binder_ioctl_done: ret=0
+            dsms-1901    [004] .....  5219.256696: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [004] .....  5219.256696: binder_ioctl_done: ret=0
+            dsms-1901    [004] .....  5219.256718: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [004] .....  5219.256724: binder_ioctl_done: ret=0
+            dsms-1901    [004] .....  5219.256725: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [004] .....  5219.256725: binder_ioctl_done: ret=0
+            dsms-1901    [004] .....  5219.256726: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [004] .....  5219.256726: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.256729: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.256756: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
+            dsms-1901    [003] .....  5219.258298: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed52c0
+    binder:910_2-930     [003] .....  5219.258314: binder_ioctl_done: ret=0
+    binder:910_2-930     [003] .....  5219.258332: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c410
+    binder:910_2-930     [003] .....  5219.258340: binder_ioctl_done: ret=0
+    binder:910_2-930     [003] .....  5219.258341: binder_ioctl: cmd=0xc0306201 arg=0x7c9b20c7d0
+            dsms-1901    [003] .....  5219.258345: binder_ioctl_done: ret=0
+            dsms-1901    [003] .....  5219.258348: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [003] .....  5219.258348: binder_ioctl_done: ret=0
+            dsms-1901    [003] .....  5219.258349: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed50e0
+            dsms-1901    [003] .....  5219.258349: binder_ioctl_done: ret=0
+            dsms-1901    [003] .....  5219.258350: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed5420
+            dsms-1901    [003] .....  5219.258350: binder_ioctl_done: ret=0
+            dsms-1901    [003] .....  5219.258361: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed55e0
+            dsms-1901    [003] .....  5219.258366: binder_ioctl_done: ret=0
+            dsms-1901    [003] .....  5219.258368: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56b0
+            dsms-1901    [003] .....  5219.258368: binder_ioctl_done: ret=0
+            dsms-1901    [003] .....  5219.258369: binder_ioctl: cmd=0xc0306201 arg=0x7fe7ed56d0
+            dsms-1901    [003] .....  5219.258369: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.258371: binder_ioctl_done: ret=0
+   binder:2425_9-4223    [000] .....  5219.258396: binder_ioctl: cmd=0xc0306201 arg=0x6f3c691020
