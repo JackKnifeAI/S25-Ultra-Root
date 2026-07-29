@@ -6,6 +6,9 @@
 
     <uses-sdk android:minSdkVersion="35" android:targetSdkVersion="35" />
 
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:label="JackKnife Root"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen"

