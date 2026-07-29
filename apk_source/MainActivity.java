@@ -481,26 +481,61 @@ public class MainActivity extends Activity {
                 String rootHelper = dir + "/" + ROOT_HELPER;
 
                 // Run the proven surveillance kill script
-                log("[*] Killing OTA, analytics, diagnostics, Bixby...");
-                String result = exec(rootHelper + " -c '"
-                    + "pm disable-user com.samsung.android.knox.analytics.uploader 2>/dev/null;"
-                    + "pm disable-user com.sec.android.diagmonagent 2>/dev/null;"
-                    + "pm disable-user com.samsung.android.networkdiagnostic 2>/dev/null;"
-                    + "pm disable-user com.sec.imslogger 2>/dev/null;"
-                    + "pm disable-user com.samsung.android.knox.pushmanager 2>/dev/null;"
-                    + "pm disable-user com.samsung.android.voc 2>/dev/null;"
-                    + "pm disable-user com.samsung.android.bixby.agent 2>/dev/null;"
-                    + "pm disable-user com.samsung.android.bixby.service 2>/dev/null;"
-                    + "pm disable-user com.samsung.android.app.spage 2>/dev/null;"
-                    + "pm disable-user com.samsung.android.forest 2>/dev/null;"
-                    + "pm disable-user com.samsung.android.app.updatecenter 2>/dev/null;"
-                    + "pm disable-user com.wssyncmldm 2>/dev/null;"
-                    + "pm disable-user com.android.stk 2>/dev/null;"
-                    + "pm disable-user com.android.stk2 2>/dev/null;"
-                    + "echo DONE'");
-                log(result);
-                log("[+] Surveillance KILLED! (persists across reboots)");
-                log("[+] SIM Toolkit BLOCKED!");
+                // ALL 26 surveillance + carrier packages
+                String[] spyware = {
+                    // Knox analytics & telemetry
+                    "com.samsung.android.knox.analytics.uploader",
+                    "com.samsung.android.sdm.config",
+                    "com.google.mainline.telemetry",
+                    // Diagnostics & logging
+                    "com.sec.android.diagmonagent",
+                    "com.samsung.android.networkdiagnostic",
+                    "com.android.devicediagnostics",
+                    "com.sec.imslogger",
+                    // Bixby AI surveillance
+                    "com.samsung.android.bixby.agent",
+                    "com.samsung.android.bixby.wakeup",
+                    "com.samsung.android.bixbyvision.framework",
+                    "com.samsung.android.visionintelligence",
+                    "com.samsung.android.forest",
+                    // Samsung cloud & push (data exfiltration)
+                    "com.samsung.android.scloud",
+                    "com.samsung.android.pushservice",
+                    "com.samsung.android.knox.pushmanager",
+                    "com.sec.spp.push",
+                    // OTA & carrier update pipeline
+                    "com.samsung.android.app.updatecenter",
+                    "com.samsung.android.app.omcagent",
+                    "com.wssyncmldm",
+                    "com.sec.android.soagent",
+                    "com.sec.omadmclient",
+                    "com.android.carrierdefaultapp",
+                    // SIM Toolkit (carrier code push)
+                    "com.android.stk",
+                    "com.android.stk2",
+                    // Samsung VOC (Voice of Customer = keyword monitoring)
+                    "com.samsung.android.voc",
+                    // Samsung app analytics
+                    "com.samsung.android.app.spage",
+                };
+                int killed = 0;
+                for (String pkg : spyware) {
+                    String r = exec(rootHelper + " -c 'pm disable-user --user 0 " + pkg + " 2>&1'");
+                    if (r.contains("disabled")) {
+                        killed++;
+                        log("[+] KILLED: " + pkg);
+                    }
+                }
+                log("");
+                log("[+] " + killed + "/" + spyware.length + " surveillance packages KILLED!");
+                log("[+] Changes PERSIST across reboots!");
+
+                // Also set carrier props to block SIM push
+                exec(rootHelper + " -c '"
+                    + "setprop persist.vendor.ril.disable_bip 1;"
+                    + "setprop persist.vendor.config.disable_stk 1;"
+                    + "echo SIM_BLOCKED'");
+                log("[+] SIM Toolkit & BIP: BLOCKED!");
 
             } catch (Exception e) {
                 log("[!] Kill error: " + e.getMessage());
