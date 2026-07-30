@@ -69,3 +69,16 @@
   (b) The canary is checked on a different code path than the one processing our data
   (c) The pending request handling doesn't trigger the vulnerable function
   Will analyze full dataset after all 2048 probes complete per orders.
+
+#### Check 2 — 2026-07-30 07:08 PDT (~7.8 hours in)
+- **Cycles completed:** 395
+- **Byte 0:** 256/256 (100% COMPLETE)
+- **Byte 1:** 131/256 (51%)
+- **All probes:** ret=256 (all delivered)
+- **Crashes:** 0
+- **Controller:** RUNNING (PID 1296521)
+- **Rate:** ~57s/cycle steady
+- **ETA remaining:** ~26h 17m (1661 probes left)
+- **Status:** NOMINAL — phone mid-reboot at check time (adb: no devices)
+- **NOTE:** Byte 0 completed with zero crashes across all 256 guesses.
+  Byte 1 half done, also zero crashes. Pattern holding.
