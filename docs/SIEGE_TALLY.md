@@ -82,3 +82,19 @@
 - **Status:** NOMINAL — phone mid-reboot at check time (adb: no devices)
 - **NOTE:** Byte 0 completed with zero crashes across all 256 guesses.
   Byte 1 half done, also zero crashes. Pattern holding.
+
+#### Check 3 — 2026-07-30 10:49 PDT (~11.5 hours in)
+- **Cycles completed:** 395 (STALLED at 06:07 AM)
+- **Byte 0:** 256/256 (100% COMPLETE)
+- **Byte 1:** 131/256 (51%)
+- **All probes:** ret=256, Crashes: 0
+- **Controller:** KILLED (was stuck in adb wait-for-device)
+- **FAILURE:** Phone disconnected from USB at ~06:08 AM
+  - dmesg shows USB connect/disconnect cycling then gone
+  - Phone may need physical cable replug or power button press
+  - 387 valid probes collected before failure
+  - All data safe in canary_results_all.txt and on-phone files
+- **ACTION NEEDED:** Physical access to phone required
+  - Replug USB cable or press power button
+  - Then relaunch controller: nohup bash run_canary_brute.sh > ~/canary_brute.log 2>&1 &
+  - State file on phone preserves position (byte 1, guess 131)
