@@ -54,3 +54,18 @@
 - All probes: ret=256 (delivered), crash=0
 - Status: RUNNING
 
+
+#### Check 1 — 2026-07-30 03:41 PDT (~4.3 hours in)
+- **Cycles completed:** 258
+- **Byte 0 progress:** 255/256 (99%) — nearly complete
+- **All probes:** ret=256 (delivered to SPU)
+- **Crashes:** 0 (no canary byte differentiation yet)
+- **Timing range:** 0.194ms — 3.871ms (avg 1.236ms)
+- **Controller:** RUNNING (PID 1296521)
+- **Rate:** ~57s per cycle (258 cycles in 4.3 hours)
+- **Status:** NOMINAL — byte 0 almost done, no crashes detected
+- **NOTE:** Zero crashes across 255 guesses means either:
+  (a) The overflow doesn't reach the canary through this pending request path
+  (b) The canary is checked on a different code path than the one processing our data
+  (c) The pending request handling doesn't trigger the vulnerable function
+  Will analyze full dataset after all 2048 probes complete per orders.
