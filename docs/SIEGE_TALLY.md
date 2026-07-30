@@ -98,3 +98,21 @@
   - Replug USB cable or press power button
   - Then relaunch controller: nohup bash run_canary_brute.sh > ~/canary_brute.log 2>&1 &
   - State file on phone preserves position (byte 1, guess 131)
+
+#### Check 4 — 2026-07-30 14:22 PDT (~15 hours in)
+- **Cycles completed:** 395 (STALLED since 06:07 AM)
+- **Byte 0:** 256/256 (100%)
+- **Byte 1:** 131/256 (51%)
+- **Crashes:** 0
+- **Controller:** NOT RUNNING (killed at check 3, not relaunched)
+- **Status:** SIEGE SUSPENDED — superseded by new discoveries
+- **REASON:** The canary brute-force used SPCOM_SEND (0x402853ED)
+  which is the WRONG ioctl. Discovered SPCOM_SEND_MODIFIED (0x404853EE)
+  is the REAL ioctl that routes through the vulnerable function 0xea0.
+  All 395 probes used the wrong code path — that's why zero crashes.
+- **NEW PATH:** Build exploit using 0x404853EE with DMA/ION buffers.
+  This is what ssgtzd actually uses via spcom_client_send_modified_command.
+  The data WILL reach the vulnerable stack copy at 0xea0 through this ioctl.
+- **CANARY OFFSET:** Corrected to 48 bytes (was 32, verified from disassembly)
+- **ACTION:** Do NOT restart siege with old tool. Build new tool with
+  SEND_MODIFIED ioctl first.
