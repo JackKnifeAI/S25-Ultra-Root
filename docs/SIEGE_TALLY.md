@@ -116,3 +116,21 @@
 - **CANARY OFFSET:** Corrected to 48 bytes (was 32, verified from disassembly)
 - **ACTION:** Do NOT restart siege with old tool. Build new tool with
   SEND_MODIFIED ioctl first.
+
+#### Check 5 — 2026-07-30 18:02 PDT (~18.7 hours since launch)
+- **Cycles completed:** 395 (stalled since 06:07 AM — 12 hours ago)
+- **Byte 0:** 256/256 (100%), **Byte 1:** 131/256 (51%)
+- **Crashes:** 0
+- **Controller:** NOT RUNNING (killed at check 3)
+- **Status:** SIEGE PERMANENTLY SUSPENDED
+- **REASON:** Session 10 research proved the old siege was using the wrong
+  ioctl (SPCOM_SEND 0x402853ED) which routes through a safe code path.
+  The REAL ioctl is SPCOM_SEND_MODIFIED (0x404853EE) which uses DMA
+  buffers and routes through the vulnerable function 0xea0.
+- **Diagnostics completed since last check:**
+  - Diag 06: SEND_MODIFIED ret=256 with inline data at offset 40
+  - Diag 07: DMA buffer layouts tested, no crash yet
+  - Decoded modify_dma_buf_addr operates on message BODY not struct
+  - Need to RE message body format before new siege can begin
+- **All 395 probes are INVALID** (wrong ioctl, wrong canary offset)
+- **Do NOT restart old siege. New tool needed with correct ioctl + DMA.**
