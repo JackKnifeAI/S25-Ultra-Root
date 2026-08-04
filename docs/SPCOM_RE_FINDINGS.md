@@ -143,3 +143,46 @@ memcpy(buf+112, data, size); // payload data follows cmd
 - Message body must reference DMA buffer at 8-byte aligned offset
 - SPU will read data from DMA physical address
 - Use qcom,sp-hlos DMA heap for SPU-accessible memory
+
+---
+
+## Session 11 Results (August 4, 2026)
+
+### CONFIRMED: 18-byte Message Format Delivers to SPU
+
+From `libspukeymintdeviceutils.so` function `sp_ext_msg_client_send_message` at 0xd954:
+
+```
+18-byte inline message:
+[0-3]:  param (uint32) — e.g., 0x11 for cmd_index=2
+[4-5]:  cmd_index (uint16) — dispatch table index (0-18)
+[6-13]: ION placeholder (0xFFFFFFFFFFFFFFFF, replaced by phys addr)
+[14-17]: dma_data_size (uint32) — bytes in DMA buffer
+
+SEND_MODIFIED struct: 72 + 18 = 90 bytes total
+ION entry: {dma_fd, offset=8} → replaces msg[8..15] with 64-bit physical address
+```
+
+**Test Result:** `ret=18` on fresh reboot = message delivered to SPU!
+- param=0x11, cmd_index=2 → SPU dispatch accepts
+- DMA buffer (sp-hlos heap) with TSID + overflow data accessible
+- No crash detected — overflow path may not be triggered
+
+### ssgtzd Binary Extracted
+- Path: `/vendor/bin/ssgtzd` → `/home/jackknife/S25_Backup/strongbox_binaries/ssgtzd`
+- Size: 184,320 bytes (extracted from /proc/PID/mem, bypassing DEFEX)
+- SHA-256: `1155c0678d0c921b110a5b65b1984e9ac3d42b2fd2194604eab91c7a87b4b120`
+- Uses MINK/QTEE framework, NOT direct spcom
+- spcom communication handled by `libspukeymintdeviceutils.so` in keymaster HAL
+
+### Spcom State Degradation
+- After multiple kill/register cycles, spcom becomes unresponsive
+- Need fresh reboot between test batches
+- First test after reboot consistently works (ret=18)
+- Subsequent tests on same channel timeout
+
+### Next Steps
+1. Disassemble spu_service.mbn function 0x17fc to understand error conditions
+2. The overflow path in 0xea0 only executes when 0x17fc returns NON-ZERO
+3. Need to find DMA data format that makes 0x17fc fail (triggering the copy-to-stack overflow)
+4. Current TSID + 0xFF data may succeed at 0x17fc, bypassing the overflow path entirely
