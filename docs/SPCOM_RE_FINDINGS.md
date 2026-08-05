@@ -281,3 +281,34 @@ IDLE (is_busy=0) → SEND → is_busy=1 → response arrives → rx_buf set
 Previous agent was WRONG about is_busy at ch+0xE8.
 That field is an init flag, not a busy flag.
 Channel serialization uses mutex at ch+0x20 only.
+
+---
+
+## BREAKTHROUGH: write() SEND Works! (August 5, 2026)
+
+### Confirmed Working Operations
+- `open("/dev/sp_kernel", O_RDWR)` → fd=4 (SUCCESS)
+- `write(fd, SEND_buf, 20)` → ret=20 (SUCCESS! 20 bytes written!)
+- `write(fd, LOCK_buf, 8)` → ret=8 (SUCCESS!)
+- `write(fd, SEND_buf, 20)` after LOCK → ret=20 (SUCCESS!)
+
+### Available Channel Devices (from device tree)
+- `/dev/spcom` — control device (NO channel association)
+- `/dev/sp_kernel` — kernel channel (HAS channel association!)
+- `/dev/sp_ssr` — SSR channel
+- NO `/dev/sp_keymaster` — must be created!
+
+### Remaining Issues
+1. **EBUSY on rapid writes**: Second write() on same fd returns errno=16
+   - This is rpmsg/GLINK flow control, not kernel mutex
+   - May need delay between writes, or read() to consume response first
+2. **SNDM errno=14 (EFAULT)**: DMA struct format differs for write() path
+   - Need to verify ION entry layout in SNDM command
+3. **No sp_keymaster chardev**: Channel exists internally but no /dev node
+   - CRTE returns EBUSY (channel already created by ssgtzd)
+   - Need to either create chardev before ssgtzd, or use write() on /dev/spcom with a hack
+
+### Key Discovery: filp->private_data
+- Set at struct file offset 0xD8 (216 bytes) — Samsung kernel specific
+- Set ONLY by spcom_device_open() when opening per-channel device
+- ioctl CREATE_CHANNEL does NOT set it (only creates internal channel)
