@@ -234,3 +234,50 @@ IDLE (is_busy=0) → SEND → is_busy=1 → response arrives → rx_buf set
 | 0x402853F1 | LOCK_ION |
 | 0x402853F2 | IS_CH_CONNECTED |
 | 0x000053F3 | READ_FW_VERSION |
+
+---
+
+## write() Interface (from spcom_device_write RE)
+
+### 7 Command Words via write()
+| Value | ASCII | Purpose |
+|-------|-------|---------|
+| 0x53454E44 | SEND | Send message (fire-and-forget, no DMA) |
+| 0x534E444D | SNDM | Send Modified (with DMA address patching) |
+| 0x43524554 | CRTE | Create channel character device |
+| 0x4C4F434B | LOCK | Lock DMA buffer by fd |
+| 0x554C434B | ULCK | Unlock DMA buffer(s) |
+| 0x45535352 | ESSR | Reset acknowledgment |
+| 0x52535452 | RSTR | Restart SPU via rproc_boot |
+
+### SEND Format (12+N bytes)
+[cmd:4=0x53454E44][timeout:4][payload_size:4][payload:N]
+
+### SNDM Format (44+N bytes)
+[cmd:4=0x534E444D][dma0_fd:4][dma0_off:4][dma1_fd:4][dma1_off:4]
+[dma2_fd:4][dma2_off:4][timeout:4][dma3_fd:4][dma3_off:4]
+[payload_size:4][payload:N]
+
+### KEY FINDING: write() is fire-and-forget!
+- write() does NOT wait for SPU response
+- write() does NOT call spcom_rx()
+- write() acquires mutex, sends, releases — instantly reusable
+- Responses accumulate at ch+0x140 via workqueue
+- CRTE command WORKS (returned EBUSY = channel exists)
+- SEND/SNDM/LOCK return EINVAL on main /dev/spcom fd
+  - These commands need a CHANNEL-ASSOCIATED fd
+  - Requires per-channel chardev or proper fd setup
+
+### Blocker: fd Association
+- write() SEND/SNDM needs the fd to be associated with a channel
+- Main /dev/spcom fd doesn't have channel association for write()
+- ioctl CREATE_CHANNEL (0xE9) sets up ioctl path but NOT write path
+- Need to either:
+  1. Create per-channel chardev and open it
+  2. Use proper ioctl to set up write() channel association
+  3. RE the exact fd->channel mapping in write handler
+
+### No is_busy Flag!
+Previous agent was WRONG about is_busy at ch+0xE8.
+That field is an init flag, not a busy flag.
+Channel serialization uses mutex at ch+0x20 only.
