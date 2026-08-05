@@ -186,3 +186,51 @@ ION entry: {dma_fd, offset=8} → replaces msg[8..15] with 64-bit physical addre
 2. The overflow path in 0xea0 only executes when 0x17fc returns NON-ZERO
 3. Need to find DMA data format that makes 0x17fc fail (triggering the copy-to-stack overflow)
 4. Current TSID + 0xFF data may succeed at 0x17fc, bypassing the overflow path entirely
+
+---
+
+## SPCOM Channel State Machine (from spcom.ko full RE)
+
+### Channel Structure (0x6F8 bytes per channel, 32 slots)
+| Offset | Field | Purpose |
+|--------|-------|---------|
+| +0x00 | name[32] | Channel name |
+| +0x20 | channel_lock | Mutex protecting state |
+| +0x50 | tx_count | Transaction ID (init 0x12345678) |
+| +0x98 | rpdev | rpmsg device pointer |
+| +0xA8 | rx_done | Completion for response arrival |
+| +0xE8 | **is_busy** | **THE BLOCKER: set on send, cleared by spcom_rx()** |
+| +0xF0 | active_pid | PID owning current transaction |
+| +0xF4 | ref_count | Open fd count |
+| +0x140 | rx_buf_size | Response data size |
+| +0x148 | rx_buf_ptr | Response data pointer |
+
+### State Machine
+```
+IDLE (is_busy=0) → SEND → is_busy=1 → response arrives → rx_buf set
+  → spcom_rx() called → copies response → clears rx_buf → IDLE
+```
+**Second send blocks because is_busy=1 is NEVER cleared without consuming response**
+
+### Why read()/GET_MESSAGE Returns -1
+- read() handler at 0xEB0 checks channel at file+216 (Samsung-specific offset)
+- May require per-channel chardev created via ioctl 0xEB/0xEC
+- GET_MESSAGE ioctl (0xC02853EE) may be for SERVER channels only
+- spcom_device_write at 0x14D4 may be the proper SEND+WAIT path
+
+### 13 Confirmed Ioctls
+| Ioctl | Name |
+|-------|------|
+| 0xC0095301 | REGISTER_CLIENT/GET_VERSION |
+| 0x80085302 | GET_NEXT_REQ_SIZE |
+| 0xC01053E8 | HANDLE_SSR |
+| 0x402053E9 | CREATE_CHANNEL (server) |
+| 0x402053EA | CREATE_CHANNEL (client) |
+| 0x402053EB | CREATE_CHANNEL + CHARDEV |
+| 0x402053EC | CREATE_CHANNEL + CHARDEV (variant) |
+| 0x402853ED | SEND_MESSAGE |
+| 0xC02853EE | GET_MESSAGE (RW, 40 bytes) |
+| 0x404853EE | SEND_MODIFIED (W, 72 bytes) |
+| 0x402853F1 | LOCK_ION |
+| 0x402853F2 | IS_CH_CONNECTED |
+| 0x000053F3 | READ_FW_VERSION |
