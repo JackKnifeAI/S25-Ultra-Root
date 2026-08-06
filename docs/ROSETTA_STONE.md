@@ -449,3 +449,62 @@ Instead of separate tools:
 1. GhostLock runs → gains R/W → finds channel → saves address
 2. GhostLock kills ssgtzd → clears channel state → sends overflow
 3. ALL in ONE constructor, ONE process, NO fork, NO timing gap
+
+---
+
+## Session 12 MILESTONE: ATOMIC SEND ret=18 FROM GHOSTLOCK!
+
+### Proven: GhostLock v15 sends to SPU with kernel R/W active
+- Root + kernel R/W + SEND_MODIFIED ALL in constructor
+- Channel found via memory scan, state cleared, ret=18!
+- Second send blocks — rpmsg transport layer, not spcom
+
+### THREE PATHS TO AVB (ranked by likelihood of success)
+
+#### PATH A: Make ONE Send Trigger the Overflow (HIGHEST PROBABILITY)
+We have ret=18 (message delivered) + kernel R/W simultaneously.
+Instead of multi-send, use kernel R/W to CORRUPT the SPU's storage
+state BEFORE the message reaches the vulnerable function.
+
+Approach: The spcom channel struct at +0x98 has the rpdev pointer.
+The rpdev has an endpoint. The endpoint routes to the SPU's service.
+If we modify the CHANNEL NAME in kernel memory from "sp_keymaster"
+to a non-existent name BETWEEN our register and our send, the SPU
+receives the message but can't find the storage → 0x17fc FAILS →
+error path → OVERFLOW!
+
+Steps:
+1. GhostLock roots + finds channel
+2. Kill ssgtzd
+3. Register on sp_keymaster (creates channel)
+4. LOCK DMA + prepare SEND_MODIFIED
+5. Use kernel R/W to modify channel name to garbage (or change tx_count)
+6. Send → SPU receives but storage lookup fails → overflow!
+
+#### PATH B: RE rpmsg Endpoint State (MEDIUM PROBABILITY)
+The second send blocks in the rpmsg/GLINK transport.
+Find the rpmsg_endpoint struct via channel→rpdev→ept.
+Clear its internal state to enable second send.
+
+Steps:
+1. From channel dump: rpdev at +0x98 is a kernel pointer
+2. Read rpdev struct to find endpoint pointer
+3. Read endpoint struct to find state fields
+4. Clear the "tx pending" or "busy" state
+5. Second SEND_MODIFIED should proceed
+
+#### PATH C: Use cmd_index That Doesn't Need Storage (LOW PROBABILITY)
+Some of the 19 SPU dispatch entries might NOT call 0x17fc.
+If a command reaches 0xea0 through a different path that doesn't
+read from storage, the overflow triggers directly.
+
+Steps:
+1. RE all 19 dispatch handlers in spu_service.mbn
+2. Find one that calls 0xea0 WITHOUT going through 0x17fc
+3. Send that cmd_index instead of 2
+
+### RECOMMENDED: PATH A
+- Uses ONLY proven capabilities (ret=18 + kernel R/W)
+- No additional RE needed
+- Single-shot approach (no multi-send required)
+- Exploits the fact that kernel R/W and spcom send are in the SAME process
