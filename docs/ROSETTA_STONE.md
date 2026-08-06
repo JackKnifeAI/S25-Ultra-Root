@@ -402,3 +402,50 @@ root_write64(fd, mutex_addr, 0);
 root_write64(fd, mutex_addr + 8, 0); // clear wait list
 // Now second SEND_MODIFIED should proceed!
 ```
+
+---
+
+## Session 12 Progress (August 5-6, 2026)
+
+### NDK Found + GhostLock Rebuilt
+- Android NDK at `/usr/lib/android-sdk/ndk/28.2.13676358/`
+- GhostLock + spcom_unlock.c compiles cleanly with NDK clang
+- 99-103KB binary, native Android ELF, no bionic patching needed
+- Integration point: fops.c `install_child_root()` between pipe_physrw and android_root
+
+### REAL Channel Found in Kernel Memory!
+- Physical address: ~0xaa94d720 (varies per boot with KASLR)
+- Found in Region A (module area 0xaa700000-0xb2700000)
+- 8-byte aligned, null-padded name field validated
+- Scanner reads full 4096-byte pages for speed
+
+### ALL THREE BLOCKERS IDENTIFIED:
+1. **sync_mutex at +0xF8** — tx_lock, LOCKED by ssgtzd (the REAL blocker!)
+2. **rx_buf at +0x140** — pending response data from previous transaction
+3. **active_pid at +0xF0** — PID ownership of current transaction
+4. Main mutex at +0x20 is often UNLOCKED — NOT the primary blocker
+
+### What Doesn't Work:
+- Cross-compiler (aarch64-linux-gnu-gcc): produces incompatible binaries
+- /dev/mem: Samsung blocks even when mknod'd (ENXIO)
+- Clearing state during boot: breaks ssgtzd's live transactions
+- Fork-based send: timing issues with child PID vs channel active_pid
+
+### Next Step: Atomic Kill→Clear→Send
+The FINAL tool needs to:
+1. Read saved channel address from /data/local/tmp/.spcom_channel
+2. Kill ssgtzd
+3. IMMEDIATELY (same ms) clear sync_mutex, active_pid, rx_buf via kernel R/W
+4. Register on sp_keymaster
+5. Send SEND_MODIFIED (should get ret=18 now!)
+6. Repeat steps 2-5 for multi-send
+
+This requires the kill and clear to happen FASTER than ssgtzd respawns (~500ms).
+The GhostLock pipe R/W primitives can clear in microseconds.
+The kill must happen FROM the GhostLock constructor (same process that has R/W).
+
+### Strategy: Build EVERYTHING into GhostLock
+Instead of separate tools:
+1. GhostLock runs → gains R/W → finds channel → saves address
+2. GhostLock kills ssgtzd → clears channel state → sends overflow
+3. ALL in ONE constructor, ONE process, NO fork, NO timing gap
