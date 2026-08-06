@@ -29,3 +29,18 @@
 - keystore_cli_v2 generate --name=test --seclevel=strongbox
 - This should work because ssgtzd is alive and keystore service is running
 - After 200 operations, THEN root and fire one-shot overflow
+
+## Strategy A RESULT (August 5, 2026)
+- 200 StrongBox keygens: ALL SUCCESS (ret=0)
+- ssgtzd alive throughout (PID 1729)
+- One-shot after flood: ret=18 (delivered, no crash)
+- CONCLUSION: Normal SPU operations don't exhaust resources
+  - Heap is properly managed during send+receive lifecycle
+  - Resource leak only on ssgtzd death (1 leak per boot = insufficient)
+
+## DEFINITIVE NEXT: Strategy D2 — LD_PRELOAD into ssgtzd
+- Only untried approach that avoids ALL 4 identified circles
+- Hook ssgtzd's ioctl/spcom calls to inject overflow payloads
+- Requires: build hook .so, bind mount, restart ssgtzd with hook
+- Uses ssgtzd's own properly-managed channel
+- Can send UNLIMITED modified messages
